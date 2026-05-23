@@ -1,0 +1,94 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 220 27% 97%;
+    --foreground: 222 47% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 11%;
+    --primary: 221 83% 53%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 215 28% 94%;
+    --secondary-foreground: 222 47% 11%;
+    --muted: 214 32% 94%;
+    --muted-foreground: 215 16% 47%;
+    --accent: 214 32% 94%;
+    --accent-foreground: 222 47% 11%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 214 24% 88%;
+    --input: 214 24% 88%;
+    --ring: 221 83% 53%;
+    --radius: 0.9rem;
+  }
+
+  .dark {
+    --background: 222 33% 10%;
+    --foreground: 210 40% 96%;
+    --card: 222 28% 13%;
+    --card-foreground: 210 40% 96%;
+    --popover: 222 28% 13%;
+    --popover-foreground: 210 40% 96%;
+    --primary: 217 91% 63%;
+    --primary-foreground: 222 47% 11%;
+    --secondary: 217 25% 18%;
+    --secondary-foreground: 210 40% 96%;
+    --muted: 217 24% 16%;
+    --muted-foreground: 215 20% 72%;
+    --accent: 217 24% 18%;
+    --accent-foreground: 210 40% 96%;
+    --destructive: 0 63% 53%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 217 20% 22%;
+    --input: 217 20% 22%;
+    --ring: 217 91% 63%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    color-scheme: light;
+  }
+
+  html.dark {
+    color-scheme: dark;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-background text-foreground font-body antialiased;
+    margin: 0;
+    background-image:
+      radial-gradient(circle at top, rgba(59, 130, 246, 0.08), transparent 32%),
+      linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+  }
+
+  .dark body {
+    background-image:
+      radial-gradient(circle at top, rgba(96, 165, 250, 0.16), transparent 34%),
+      linear-gradient(180deg, #0f172a 0%, #111827 100%);
+  }
+
+  ::selection {
+    background: rgba(59, 130, 246, 0.2);
+    color: inherit;
+  }
+
+  button,
+  input,
+  textarea,
+  select {
+    font: inherit;
+  }
+}
