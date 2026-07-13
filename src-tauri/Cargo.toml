@@ -14,8 +14,11 @@ chrono = { version = "0.4", features = ["clock"] }
 dirs = "6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["devtools"] }
 walkdir = "2"
 
 [features]
 default = []
+# Enabled by `tauri build` automatically; must be passed explicitly to `cargo build --release`
+# or tauri-build emits `cfg(dev)` and the webview loads the devUrl instead of embedded assets.
+custom-protocol = ["tauri/custom-protocol"]

@@ -82,7 +82,9 @@ build_frontend() {
 build_backend() {
   echo "==> Building tauri binary ($PROFILE)"
   if [[ "$PROFILE" == "release" ]]; then
-    cargo build --release --manifest-path "$SCRIPT_DIR/src-tauri/Cargo.toml"
+    # `tauri build` handles cargo build (with custom-protocol auto-injected)
+    # and produces the .app bundle so macOS picks up the icon and Info.plist.
+    (cd "$SCRIPT_DIR" && pnpm tauri build)
   else
     cargo build --manifest-path "$SCRIPT_DIR/src-tauri/Cargo.toml"
   fi
@@ -119,7 +121,11 @@ open_app() {
 }
 
 main() {
-  build_frontend
+  # `pnpm tauri build` invokes `beforeBuildCommand` (which is `pnpm build`),
+  # so skip the manual frontend build to avoid running tsc + vite twice.
+  if [[ "$PROFILE" != "release" ]]; then
+    build_frontend
+  fi
   build_backend
   open_app
 }
