@@ -88,6 +88,10 @@ pub fn read_session_detail(path: &Path) -> Result<SessionDetail> {
     let index_by_path = read_indexed_paths(&claude_root()?).unwrap_or_default();
     let canonical = canonical_or(path);
     let indexed = index_by_path.get(&canonical).cloned();
+    let file_updated_at = metadata_timestamp(path).ok();
+    let indexed_updated_at = indexed
+        .as_ref()
+        .and_then(|entry| entry.modified.as_deref().or(entry.created.as_deref()));
 
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
 
@@ -101,11 +105,13 @@ pub fn read_session_detail(path: &Path) -> Result<SessionDetail> {
 
     let mut stats = SessionStats::new(
         path.to_string_lossy().into_owned(),
-        metadata_timestamp(path)?,
+        resolve_session_updated_at(None, file_updated_at.clone(), indexed_updated_at),
     );
 
     let mut events = Vec::new();
     let mut first_prompt: Option<String> = None;
+    let mut last_prompt: Option<String> = None;
+    let mut last_event_at: Option<String> = None;
     let mut ai_title: Option<String> = None;
     let mut current_cwd: Option<String> = None;
     let mut current_git_branch: Option<String> = None;
@@ -127,6 +133,7 @@ pub fn read_session_detail(path: &Path) -> Result<SessionDetail> {
             .get("timestamp")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned);
+        update_latest_timestamp(&mut last_event_at, timestamp.as_deref());
 
         if let Some(cwd) = value.get("cwd").and_then(Value::as_str) {
             if !cwd.is_empty() {
@@ -169,6 +176,7 @@ pub fn read_session_detail(path: &Path) -> Result<SessionDetail> {
                     &mut events,
                     &mut stats,
                     &mut first_prompt,
+                    &mut last_prompt,
                 );
             }
             "assistant" => {
@@ -218,11 +226,8 @@ pub fn read_session_detail(path: &Path) -> Result<SessionDetail> {
                     continue;
                 }
                 events.push(SessionEvent::PermissionMode {
-                    meta: EventMeta::new(
-                        format!("claude-perm-{line_no}"),
-                        "permission-mode",
-                    )
-                    .with_timestamp(timestamp.clone()),
+                    meta: EventMeta::new(format!("claude-perm-{line_no}"), "permission-mode")
+                        .with_timestamp(timestamp.clone()),
                     mode,
                 });
             }
@@ -311,11 +316,8 @@ pub fn read_session_detail(path: &Path) -> Result<SessionDetail> {
                     truncated
                 });
                 events.push(SessionEvent::Lifecycle {
-                    meta: EventMeta::new(
-                        format!("claude-queue-{line_no}"),
-                        "queue-operation",
-                    )
-                    .with_timestamp(timestamp.clone()),
+                    meta: EventMeta::new(format!("claude-queue-{line_no}"), "queue-operation")
+                        .with_timestamp(timestamp.clone()),
                     event: value
                         .get("operation")
                         .and_then(Value::as_str)
@@ -349,34 +351,31 @@ pub fn read_session_detail(path: &Path) -> Result<SessionDetail> {
         .or_else(|| project_path_from_dir(path));
 
     if !info.is_subagent {
-        if let Some(title) = ai_title.clone() {
-            summary.title = clean_title(Some(&title)).unwrap_or(title);
-        } else if let Some(entry) = &indexed {
-            summary.title = clean_title(entry.summary.as_deref())
-                .or_else(|| clean_title(entry.first_prompt.as_deref()))
-                .or_else(|| clean_title(first_prompt.as_deref()))
-                .unwrap_or_else(|| summary.id.clone());
-        } else {
-            summary.title = clean_title(first_prompt.as_deref())
-                .unwrap_or_else(|| summary.id.clone());
-        }
+        let recap = ai_title
+            .clone()
+            .or_else(|| indexed.as_ref().and_then(|entry| entry.summary.clone()));
+        summary.title = clean_title(recap.as_deref())
+            .or_else(|| clean_title(last_prompt.as_deref()))
+            .or_else(|| clean_title(first_prompt.as_deref()))
+            .unwrap_or_else(|| summary.id.clone());
+        summary.preview = last_prompt
+            .as_deref()
+            .or(recap.as_deref())
+            .or(first_prompt.as_deref())
+            .map(clean_preview)
+            .unwrap_or_default();
     } else {
         let prefix = "subagent";
-        let agent_label = info
-            .agent_id
-            .clone()
-            .unwrap_or_else(|| "agent".to_string());
+        let agent_label = info.agent_id.clone().unwrap_or_else(|| "agent".to_string());
         summary.title = clean_title(first_prompt.as_deref())
             .map(|t| format!("{prefix} {agent_label} · {t}"))
             .unwrap_or_else(|| format!("{prefix} {agent_label}"));
         summary.agent_nickname = Some(agent_label);
+        summary.preview = clean_preview(first_prompt.as_deref().unwrap_or(""));
     }
-
-    summary.preview = clean_preview(first_prompt.as_deref().unwrap_or(""));
-    summary.updated_at = indexed
-        .as_ref()
-        .and_then(|entry| entry.modified.clone().or_else(|| entry.created.clone()))
-        .unwrap_or_else(|| stats.updated_at.clone());
+    summary.updated_at =
+        resolve_session_updated_at(last_event_at, file_updated_at, indexed_updated_at);
+    stats.updated_at = summary.updated_at.clone();
     summary.is_partial = false;
 
     Ok(SessionDetail {
@@ -393,6 +392,7 @@ fn handle_user_content(
     events: &mut Vec<SessionEvent>,
     stats: &mut SessionStats,
     first_prompt: &mut Option<String>,
+    last_prompt: &mut Option<String>,
 ) {
     match content {
         Value::String(text) => {
@@ -403,6 +403,9 @@ fn handle_user_content(
             let text = trimmed.to_string();
             if first_prompt.is_none() {
                 *first_prompt = Some(text.clone());
+            }
+            if is_meaningful_prompt(&text) {
+                *last_prompt = Some(text.clone());
             }
             stats.user_count += 1;
             stats.content_chars += text.chars().count();
@@ -448,6 +451,9 @@ fn handle_user_content(
                 if first_prompt.is_none() {
                     *first_prompt = Some(text.clone());
                 }
+                if is_meaningful_prompt(&text) {
+                    *last_prompt = Some(text.clone());
+                }
                 stats.user_count += 1;
                 stats.content_chars += text.chars().count();
                 events.push(SessionEvent::User {
@@ -470,11 +476,8 @@ fn handle_user_content(
                 let (content_text, _) = truncate_chars(&content_text, RESULT_TRUNCATE_CHARS);
                 stats.content_chars += content_text.chars().count();
                 events.push(SessionEvent::ToolResult {
-                    meta: EventMeta::new(
-                        format!("claude-toolres-{line_no}-{idx}"),
-                        "tool_result",
-                    )
-                    .with_timestamp(timestamp.clone()),
+                    meta: EventMeta::new(format!("claude-toolres-{line_no}-{idx}"), "tool_result")
+                        .with_timestamp(timestamp.clone()),
                     call_id,
                     content: content_text,
                     is_error,
@@ -686,22 +689,19 @@ fn summarize_tool_use(name: &str, input: &Value) -> Option<String> {
             .get("pattern")
             .and_then(Value::as_str)
             .map(|p| format!("grep {p}")),
-        "TodoWrite" => input
-            .get("todos")
-            .and_then(Value::as_array)
-            .map(|todos| {
-                let listed = todos
-                    .iter()
-                    .filter_map(|t| t.get("content").and_then(Value::as_str))
-                    .take(8)
-                    .collect::<Vec<_>>()
-                    .join("\n- ");
-                if listed.is_empty() {
-                    "update todos".to_string()
-                } else {
-                    format!("todos\n- {listed}")
-                }
-            }),
+        "TodoWrite" => input.get("todos").and_then(Value::as_array).map(|todos| {
+            let listed = todos
+                .iter()
+                .filter_map(|t| t.get("content").and_then(Value::as_str))
+                .take(8)
+                .collect::<Vec<_>>()
+                .join("\n- ");
+            if listed.is_empty() {
+                "update todos".to_string()
+            } else {
+                format!("todos\n- {listed}")
+            }
+        }),
         "Task" | "Agent" => input
             .get("prompt")
             .and_then(Value::as_str)
@@ -774,7 +774,7 @@ fn scan_summary(info: &PathInfo, indexed: Option<&IndexEntry>) -> Result<Session
         SessionSource::Claude,
         path.to_string_lossy().into_owned(),
     );
-    summary.updated_at = metadata_timestamp(path)?;
+    let file_updated_at = metadata_timestamp(path).ok();
     summary.is_sidechain = info.is_subagent;
     summary.parent_session_id = info.parent_session_id.clone();
     summary.project_path = indexed
@@ -783,6 +783,8 @@ fn scan_summary(info: &PathInfo, indexed: Option<&IndexEntry>) -> Result<Session
 
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let mut first_prompt: Option<String> = None;
+    let mut last_prompt: Option<String> = None;
+    let mut last_event_at: Option<String> = None;
     let mut ai_title: Option<String> = None;
     let mut user_count = 0usize;
     let mut assistant_count = 0usize;
@@ -790,7 +792,8 @@ fn scan_summary(info: &PathInfo, indexed: Option<&IndexEntry>) -> Result<Session
     let mut current_cwd: Option<String> = None;
     let mut current_git_branch: Option<String> = None;
     let mut current_model: Option<String> = None;
-    let mut seen_assistant_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen_assistant_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     for line in BufReader::new(file).lines() {
         let line = line?;
@@ -801,6 +804,10 @@ fn scan_summary(info: &PathInfo, indexed: Option<&IndexEntry>) -> Result<Session
             Ok(value) => value,
             Err(_) => continue,
         };
+        update_latest_timestamp(
+            &mut last_event_at,
+            value.get("timestamp").and_then(Value::as_str),
+        );
 
         if let Some(cwd) = value.get("cwd").and_then(Value::as_str) {
             if !cwd.is_empty() {
@@ -836,21 +843,26 @@ fn scan_summary(info: &PathInfo, indexed: Option<&IndexEntry>) -> Result<Session
                         if first_prompt.is_none() {
                             first_prompt = Some(trimmed.to_string());
                         }
+                        if is_meaningful_prompt(trimmed) {
+                            last_prompt = Some(trimmed.to_string());
+                        }
                     }
                     Value::Array(items) => {
                         let text_parts: Vec<&str> = items
                             .iter()
-                            .filter(|item| {
-                                item.get("type").and_then(Value::as_str) == Some("text")
-                            })
+                            .filter(|item| item.get("type").and_then(Value::as_str) == Some("text"))
                             .filter_map(|item| item.get("text").and_then(Value::as_str))
                             .map(str::trim)
                             .filter(|t| !t.is_empty())
                             .collect();
                         if !text_parts.is_empty() {
                             user_count += 1;
+                            let joined = text_parts.join("\n\n");
                             if first_prompt.is_none() {
-                                first_prompt = Some(text_parts.join("\n\n"));
+                                first_prompt = Some(joined.clone());
+                            }
+                            if is_meaningful_prompt(&joined) {
+                                last_prompt = Some(joined);
                             }
                         }
                     }
@@ -859,10 +871,7 @@ fn scan_summary(info: &PathInfo, indexed: Option<&IndexEntry>) -> Result<Session
             }
             Some("assistant") => {
                 let message = value.get("message");
-                if let Some(model) = message
-                    .and_then(|m| m.get("model"))
-                    .and_then(Value::as_str)
-                {
+                if let Some(model) = message.and_then(|m| m.get("model")).and_then(Value::as_str) {
                     current_model = Some(model.to_string());
                 }
                 let items = message
@@ -873,15 +882,14 @@ fn scan_summary(info: &PathInfo, indexed: Option<&IndexEntry>) -> Result<Session
                 let mut has_text = false;
                 for item in items {
                     match item.get("type").and_then(Value::as_str) {
-                        Some("text") => {
+                        Some("text")
                             if item
                                 .get("text")
                                 .and_then(Value::as_str)
                                 .map(|t| !t.trim().is_empty())
-                                .unwrap_or(false)
-                            {
-                                has_text = true;
-                            }
+                                .unwrap_or(false) =>
+                        {
+                            has_text = true;
                         }
                         Some("tool_use") => tool_call_count += 1,
                         _ => {}
@@ -913,13 +921,11 @@ fn scan_summary(info: &PathInfo, indexed: Option<&IndexEntry>) -> Result<Session
                     }
                 }
             }
-            Some("last-prompt") => {
-                if first_prompt.is_none() {
-                    first_prompt = value
-                        .get("lastPrompt")
-                        .and_then(Value::as_str)
-                        .map(ToOwned::to_owned);
-                }
+            Some("last-prompt") if first_prompt.is_none() => {
+                first_prompt = value
+                    .get("lastPrompt")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned);
             }
             _ => {}
         }
@@ -935,32 +941,29 @@ fn scan_summary(info: &PathInfo, indexed: Option<&IndexEntry>) -> Result<Session
     summary.is_partial = false;
 
     if !info.is_subagent {
-        if let Some(title) = ai_title {
-            summary.title = clean_title(Some(&title)).unwrap_or(title);
-        } else if let Some(entry) = indexed {
-            summary.title = clean_title(entry.summary.as_deref())
-                .or_else(|| clean_title(entry.first_prompt.as_deref()))
-                .or_else(|| clean_title(first_prompt.as_deref()))
-                .unwrap_or_else(|| summary.id.clone());
-        } else {
-            summary.title = clean_title(first_prompt.as_deref())
-                .unwrap_or_else(|| summary.id.clone());
-        }
+        let recap = ai_title.or_else(|| indexed.and_then(|entry| entry.summary.clone()));
+        summary.title = clean_title(recap.as_deref())
+            .or_else(|| clean_title(last_prompt.as_deref()))
+            .or_else(|| clean_title(first_prompt.as_deref()))
+            .unwrap_or_else(|| summary.id.clone());
+        summary.preview = last_prompt
+            .as_deref()
+            .or(recap.as_deref())
+            .or(first_prompt.as_deref())
+            .map(clean_preview)
+            .unwrap_or_default();
     } else {
-        let agent_label = info
-            .agent_id
-            .clone()
-            .unwrap_or_else(|| "agent".to_string());
+        let agent_label = info.agent_id.clone().unwrap_or_else(|| "agent".to_string());
         summary.title = clean_title(first_prompt.as_deref())
             .map(|t| format!("subagent {agent_label} · {t}"))
             .unwrap_or_else(|| format!("subagent {agent_label}"));
         summary.agent_nickname = Some(agent_label);
+        summary.preview = clean_preview(first_prompt.as_deref().unwrap_or(""));
     }
-
-    summary.preview = clean_preview(first_prompt.as_deref().unwrap_or(""));
-    summary.updated_at = indexed
-        .and_then(|entry| entry.modified.clone().or_else(|| entry.created.clone()))
-        .unwrap_or(summary.updated_at);
+    let indexed_updated_at =
+        indexed.and_then(|entry| entry.modified.as_deref().or(entry.created.as_deref()));
+    summary.updated_at =
+        resolve_session_updated_at(last_event_at, file_updated_at, indexed_updated_at);
     Ok(summary)
 }
 

@@ -9,20 +9,24 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
+  ArrowDownToLine,
   Bot,
   Brain,
   ChevronDown,
   Clock3,
   Compass,
+  EyeOff,
   FileCog,
   FileText,
   Folder,
   FolderRoot,
+  FolderTree,
   GitBranch,
   Hammer,
   History,
   Info,
   KeyRound,
+  LayoutList,
   ListTree,
   MessageSquareQuote,
   MoonStar,
@@ -53,6 +57,16 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { applyTheme, persistTheme, resolveInitialTheme, type ThemeMode } from "@/lib/theme";
+import {
+  clampSidebarWidth,
+  persistHideSubagents,
+  persistSidebarWidth,
+  persistViewMode,
+  resolveHideSubagents,
+  resolveSidebarWidth,
+  resolveViewMode,
+  type ViewMode,
+} from "@/lib/prefs";
 import { cn } from "@/lib/utils";
 import type {
   SessionDetail,
@@ -93,11 +107,29 @@ export default function App() {
     () => new Set(),
   );
   const [renderMarkdown, setRenderMarkdown] = useState(true);
+  const [viewMode, setViewMode] = useState<ViewMode>(() => resolveViewMode());
+  const [hideSubagents, setHideSubagents] = useState<boolean>(() =>
+    resolveHideSubagents(),
+  );
+  const [sidebarWidth, setSidebarWidth] = useState<number>(() =>
+    resolveSidebarWidth(),
+  );
+  const sidebarWidthRef = useRef(sidebarWidth);
+  const resizingRef = useRef(false);
   const deferredSelection = useDeferredValue(selectedPath);
 
+  // One "now" per session load — relative times / staleness don't need to tick
+  // in real time; "3 天前" granularity is fine.
+  const now = useMemo(() => Date.now(), [sessions]);
+
+  const visibleSessions = useMemo(
+    () => (hideSubagents ? sessions.filter((s) => !s.isSidechain) : sessions),
+    [sessions, hideSubagents],
+  );
+
   const groupedSessions = useMemo(
-    () => groupSessionsByWorkspace(sessions),
-    [sessions],
+    () => groupSessionsByWorkspace(visibleSessions),
+    [visibleSessions],
   );
 
   function toggleGroup(key: string) {
@@ -116,6 +148,45 @@ export default function App() {
     applyTheme(theme);
     persistTheme(theme);
   }, [theme]);
+
+  useEffect(() => {
+    persistViewMode(viewMode);
+  }, [viewMode]);
+
+  useEffect(() => {
+    persistHideSubagents(hideSubagents);
+  }, [hideSubagents]);
+
+  // Draggable divider between the session list and the transcript. The sidebar
+  // starts at the viewport's left edge, so clientX is the raw column width.
+  useEffect(() => {
+    function onMove(event: MouseEvent) {
+      if (!resizingRef.current) return;
+      const next = clampSidebarWidth(event.clientX);
+      sidebarWidthRef.current = next;
+      setSidebarWidth(next);
+    }
+    function onUp() {
+      if (!resizingRef.current) return;
+      resizingRef.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      persistSidebarWidth(sidebarWidthRef.current);
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, []);
+
+  function handleResizeStart(event: React.MouseEvent) {
+    event.preventDefault();
+    resizingRef.current = true;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -270,16 +341,11 @@ export default function App() {
               <DropdownMenuTrigger asChild>
                 <Button
                   variant="outline"
-                  className="h-10 min-w-[220px] justify-between px-3"
+                  className="h-10 min-w-[140px] justify-between px-3"
                 >
-                  <div className="text-left">
-                    <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-                      Source
-                    </div>
-                    <div className="mt-0.5 text-sm font-medium">
-                      {sourceMeta[source].label}
-                    </div>
-                  </div>
+                  <span className="text-sm font-medium">
+                    {sourceMeta[source].label}
+                  </span>
                   <ChevronDown className="h-4 w-4 text-muted-foreground" />
                 </Button>
               </DropdownMenuTrigger>
@@ -306,8 +372,11 @@ export default function App() {
           </div>
         </header>
 
-        <section className="grid min-h-0 flex-1 grid-cols-[360px_minmax(0,1fr)]">
-          <aside className="flex min-h-0 flex-col border-r border-border bg-background/55">
+        <section className="flex min-h-0 flex-1">
+          <aside
+            style={{ width: sidebarWidth }}
+            className="flex min-h-0 shrink-0 flex-col bg-background/55"
+          >
             <div className="border-b border-border px-5 py-4">
               <div className="flex items-start justify-between gap-3">
                 <div>
@@ -318,11 +387,40 @@ export default function App() {
                     {sourceMeta[source].label}
                   </h2>
                 </div>
-                <Badge variant="outline">{sessions.length} total</Badge>
+                <Badge variant="outline">{visibleSessions.length} shown</Badge>
               </div>
-              <p className="mt-3 text-sm text-muted-foreground">
-                {sourceMeta[source].hint}
-              </p>
+
+              <div className="mt-3 flex items-center justify-between gap-2">
+                <div className="inline-flex rounded-lg border border-border p-0.5">
+                  <ViewModeButton
+                    active={viewMode === "recent"}
+                    icon={LayoutList}
+                    label="最近"
+                    onClick={() => setViewMode("recent")}
+                  />
+                  <ViewModeButton
+                    active={viewMode === "grouped"}
+                    icon={FolderTree}
+                    label="分组"
+                    onClick={() => setViewMode("grouped")}
+                  />
+                </div>
+                <Button
+                  type="button"
+                  variant={hideSubagents ? "default" : "outline"}
+                  size="sm"
+                  className="h-7 gap-1.5 px-2 text-xs"
+                  onClick={() => setHideSubagents((v) => !v)}
+                  title={
+                    hideSubagents
+                      ? "当前隐藏 subagent，点击显示"
+                      : "当前显示 subagent，点击隐藏"
+                  }
+                >
+                  <EyeOff className="h-3.5 w-3.5" />
+                  subagent
+                </Button>
+              </div>
             </div>
 
             <ScrollArea className="min-h-0 flex-1">
@@ -346,8 +444,27 @@ export default function App() {
                   />
                 )}
 
+                {!listLoading && !listError && viewMode === "recent" && (
+                  <div className="divide-y divide-border">
+                    {visibleSessions.map((session, index) => (
+                      <SessionRow
+                        key={session.path}
+                        session={session}
+                        now={now}
+                        active={selectedPath === session.path}
+                        animationIndex={index}
+                        showWorkspace
+                        onSelect={(path) =>
+                          startTransition(() => setSelectedPath(path))
+                        }
+                      />
+                    ))}
+                  </div>
+                )}
+
                 {!listLoading &&
                   !listError &&
+                  viewMode === "grouped" &&
                   (() => {
                     let runningIndex = 0;
                     return groupedSessions.map((group) => {
@@ -384,89 +501,18 @@ export default function App() {
                           </button>
                           {!collapsed && (
                             <div className="divide-y divide-border">
-                              {group.sessions.map((session) => {
-                                const active = selectedPath === session.path;
-                                const animationIndex = runningIndex++;
-                                return (
-                                  <button
-                                    key={session.path}
-                                    type="button"
-                                    className={cn(
-                                      "relative w-full px-5 py-4 text-left transition-colors duration-200 animate-floatIn",
-                                      active
-                                        ? "bg-primary/[0.05]"
-                                        : "bg-transparent hover:bg-muted/40",
-                                    )}
-                                    style={{
-                                      animationDelay: `${animationIndex * 28}ms`,
-                                    }}
-                                    onClick={() =>
-                                      startTransition(() => {
-                                        setSelectedPath(session.path);
-                                      })
-                                    }
-                                  >
-                                    {active && (
-                                      <span className="absolute inset-y-0 left-0 w-0.5 bg-primary" />
-                                    )}
-
-                                    <div className="flex items-start justify-between gap-3">
-                                      <div className="min-w-0">
-                                        <div className="block max-w-full truncate text-sm font-semibold text-foreground">
-                                          {session.title}
-                                        </div>
-                                        <div className="mt-1 font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
-                                          {formatDateShort(session.updatedAt)}
-                                        </div>
-                                      </div>
-                                      <div className="flex shrink-0 flex-col items-end gap-1">
-                                        <Badge variant={active ? "default" : "outline"}>
-                                          {session.source}
-                                        </Badge>
-                                        {session.isSidechain && (
-                                          <Badge
-                                            variant="outline"
-                                            className="text-[10px]"
-                                          >
-                                            subagent
-                                          </Badge>
-                                        )}
-                                      </div>
-                                    </div>
-
-                                    {!!session.preview && (
-                                      <div className="mt-2 overflow-hidden break-words text-sm leading-5 text-muted-foreground [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2]">
-                                        {session.preview}
-                                      </div>
-                                    )}
-
-                                    {!session.isPartial && (
-                                      <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
-                                        <MetaInline
-                                          icon={MessageSquareQuote}
-                                          text={`${session.messageCount} msgs`}
-                                        />
-                                        <MetaInline
-                                          icon={Hammer}
-                                          text={`${session.toolCallCount} tools`}
-                                        />
-                                        {session.subagentCount > 0 && (
-                                          <MetaInline
-                                            icon={Network}
-                                            text={`${session.subagentCount} agents`}
-                                          />
-                                        )}
-                                        {session.gitBranch && (
-                                          <MetaInline
-                                            icon={GitBranch}
-                                            text={session.gitBranch}
-                                          />
-                                        )}
-                                      </div>
-                                    )}
-                                  </button>
-                                );
-                              })}
+                              {group.sessions.map((session) => (
+                                <SessionRow
+                                  key={session.path}
+                                  session={session}
+                                  now={now}
+                                  active={selectedPath === session.path}
+                                  animationIndex={runningIndex++}
+                                  onSelect={(path) =>
+                                    startTransition(() => setSelectedPath(path))
+                                  }
+                                />
+                              ))}
                             </div>
                           )}
                         </div>
@@ -477,7 +523,18 @@ export default function App() {
             </ScrollArea>
           </aside>
 
-          <section className="flex min-h-0 flex-col">
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="拖动调整列表宽度"
+            onMouseDown={handleResizeStart}
+            className="group relative w-px shrink-0 cursor-col-resize bg-border transition-colors hover:bg-primary/50"
+          >
+            {/* wider invisible hit area so the 1px line is easy to grab */}
+            <div className="absolute inset-y-0 -left-1.5 -right-1.5 z-10" />
+          </div>
+
+          <section className="flex min-h-0 min-w-0 flex-1 flex-col">
             <div className="border-b border-border px-6 py-5">
               <div className="flex flex-wrap items-start justify-between gap-4">
                 <div className="min-w-0">
@@ -693,6 +750,140 @@ function LogoMark() {
   );
 }
 
+function ViewModeButton({
+  active,
+  icon: Icon,
+  label,
+  onClick,
+}: {
+  active: boolean;
+  icon: LucideIcon;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
+        active
+          ? "bg-primary text-primary-foreground"
+          : "text-muted-foreground hover:text-foreground",
+      )}
+    >
+      <Icon className="h-3.5 w-3.5" />
+      {label}
+    </button>
+  );
+}
+
+const STALE_TEXT: Record<StalenessLevel, string> = {
+  fresh: "text-muted-foreground",
+  warn: "text-amber-600 dark:text-amber-400",
+  stale: "text-rose-600 dark:text-rose-400",
+};
+
+const STALE_DOT: Record<StalenessLevel, string> = {
+  fresh: "",
+  warn: "bg-amber-500",
+  stale: "bg-rose-500",
+};
+
+function SessionRow({
+  session,
+  now,
+  active,
+  animationIndex,
+  showWorkspace,
+  onSelect,
+}: {
+  session: SessionSummary;
+  now: number;
+  active: boolean;
+  animationIndex: number;
+  showWorkspace?: boolean;
+  onSelect: (path: string) => void;
+}) {
+  const level = stalenessLevel(session.updatedAt, now);
+  const workspace = getWorkspacePath(session);
+  return (
+    <button
+      type="button"
+      className={cn(
+        "relative w-full px-5 py-4 text-left transition-colors duration-200 animate-floatIn",
+        active ? "bg-primary/[0.05]" : "bg-transparent hover:bg-muted/40",
+      )}
+      // cap the stagger so a 1000-row flat list doesn't take ~28s to fully float in
+      style={{ animationDelay: `${Math.min(animationIndex, 18) * 28}ms` }}
+      onClick={() => onSelect(session.path)}
+    >
+      {active && <span className="absolute inset-y-0 left-0 w-0.5 bg-primary" />}
+
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="block max-w-full truncate text-sm font-semibold text-foreground">
+            {session.title}
+          </div>
+          <div
+            className="mt-1 flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-[0.16em]"
+            title={formatDateLong(session.updatedAt)}
+          >
+            {level !== "fresh" && (
+              <span
+                className={cn("h-1.5 w-1.5 rounded-full", STALE_DOT[level])}
+              />
+            )}
+            <span className={STALE_TEXT[level]}>
+              {formatRelativeTime(session.updatedAt, now)}
+            </span>
+          </div>
+        </div>
+        <div className="flex shrink-0 flex-col items-end gap-1">
+          <Badge variant={active ? "default" : "outline"}>{session.source}</Badge>
+          {session.isSidechain && (
+            <Badge variant="outline" className="text-[10px]">
+              subagent
+            </Badge>
+          )}
+        </div>
+      </div>
+
+      {showWorkspace && workspace && (
+        <div className="mt-1.5 flex items-center gap-1 text-[11px] text-muted-foreground">
+          <Folder className="h-3 w-3 shrink-0" />
+          <span className="truncate">{formatGroupLabel(workspace)}</span>
+        </div>
+      )}
+
+      {!!session.preview && (
+        <div className="mt-2 overflow-hidden break-words text-sm leading-5 text-muted-foreground [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2]">
+          {session.preview}
+        </div>
+      )}
+
+      {!session.isPartial && (
+        <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+          <MetaInline
+            icon={MessageSquareQuote}
+            text={`${session.messageCount} msgs`}
+          />
+          <MetaInline icon={Hammer} text={`${session.toolCallCount} tools`} />
+          {session.subagentCount > 0 && (
+            <MetaInline
+              icon={Network}
+              text={`${session.subagentCount} agents`}
+            />
+          )}
+          {session.gitBranch && (
+            <MetaInline icon={GitBranch} text={session.gitBranch} />
+          )}
+        </div>
+      )}
+    </button>
+  );
+}
+
 function MetaInline({ icon: Icon, text }: { icon: LucideIcon; text: string }) {
   return (
     <span className="inline-flex items-center gap-1.5">
@@ -780,6 +971,7 @@ function EventStream({
   renderMarkdown: boolean;
 }) {
   const parentRef = useRef<HTMLDivElement | null>(null);
+  const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   const renderMode = renderMarkdown ? "markdown" : "raw";
 
   // sessionPath in the key forces a fresh virtualizer when the user switches sessions,
@@ -794,32 +986,66 @@ function EventStream({
   });
 
   const items = virtualizer.getVirtualItems();
+  const totalSize = virtualizer.getTotalSize();
+
+  const updateJumpToBottomVisibility = () => {
+    const viewport = parentRef.current;
+    if (!viewport) {
+      return;
+    }
+    const distanceToBottom = totalSize - viewport.scrollTop - viewport.clientHeight;
+    setShowJumpToBottom(distanceToBottom > 48);
+  };
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(updateJumpToBottomVisibility);
+    return () => window.cancelAnimationFrame(frame);
+  }, [renderMode, sessionPath, totalSize]);
 
   return (
-    <div
-      ref={parentRef}
-      className="h-full overflow-auto"
-      style={{ contain: "strict" }}
-    >
+    <div className="relative h-full">
       <div
-        className="relative w-full"
-        style={{ height: `${virtualizer.getTotalSize()}px` }}
+        ref={parentRef}
+        className="h-full overflow-auto"
+        style={{ contain: "strict" }}
+        onScroll={updateJumpToBottomVisibility}
       >
-        {items.map((virtualRow) => {
-          const event = events[virtualRow.index];
-          return (
-            <div
-              key={virtualRow.key}
-              data-index={virtualRow.index}
-              ref={virtualizer.measureElement}
-              className="absolute left-0 right-0 border-b border-border"
-              style={{ transform: `translateY(${virtualRow.start}px)` }}
-            >
-              <EventRow event={event} renderMarkdown={renderMarkdown} />
-            </div>
-          );
-        })}
+        <div
+          className="relative w-full"
+          style={{ height: `${totalSize}px` }}
+        >
+          {items.map((virtualRow) => {
+            const event = events[virtualRow.index];
+            return (
+              <div
+                key={virtualRow.key}
+                data-index={virtualRow.index}
+                ref={virtualizer.measureElement}
+                className="absolute left-0 right-0 border-b border-border"
+                style={{ transform: `translateY(${virtualRow.start}px)` }}
+              >
+                <EventRow event={event} renderMarkdown={renderMarkdown} />
+              </div>
+            );
+          })}
+        </div>
       </div>
+
+      {showJumpToBottom && (
+        <Button
+          type="button"
+          size="icon"
+          variant="outline"
+          className="absolute bottom-4 right-5 z-20 rounded-full border-primary/35 bg-background/95 text-primary shadow-lg backdrop-blur hover:border-primary/60"
+          onClick={() =>
+            virtualizer.scrollToIndex(events.length - 1, { align: "end" })
+          }
+          title="跳到会话底部"
+          aria-label="跳到会话底部"
+        >
+          <ArrowDownToLine className="h-4 w-4" />
+        </Button>
+      )}
     </div>
   );
 }
@@ -1395,13 +1621,44 @@ function formatGroupLabel(rawPath: string): string {
   return `/${segments[0]}/…/${segments[segments.length - 1]}`;
 }
 
-function formatDateShort(value: string) {
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(value));
+const DAY_MS = 86_400_000;
+
+function ageInDays(value: string, now: number): number {
+  const parsed = Date.parse(value);
+  if (Number.isNaN(parsed)) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return Math.max(0, (now - parsed) / DAY_MS);
+}
+
+type StalenessLevel = "fresh" | "warn" | "stale";
+
+// >3d warns, >7d is loudly stale. Framed as a "come back to this" nudge,
+// not an expiry warning — colours live in the row renderer.
+function stalenessLevel(value: string, now: number): StalenessLevel {
+  const days = ageInDays(value, now);
+  if (days > 7) return "stale";
+  if (days > 3) return "warn";
+  return "fresh";
+}
+
+function formatRelativeTime(value: string, now: number): string {
+  const parsed = Date.parse(value);
+  if (Number.isNaN(parsed)) {
+    return "";
+  }
+  const sec = Math.max(0, (now - parsed) / 1000);
+  if (sec < 60) return "刚刚";
+  const min = sec / 60;
+  if (min < 60) return `${Math.floor(min)} 分钟前`;
+  const hr = min / 60;
+  if (hr < 24) return `${Math.floor(hr)} 小时前`;
+  const day = hr / 24;
+  if (day < 7) return `${Math.floor(day)} 天前`;
+  const wk = day / 7;
+  if (wk < 5) return `${Math.floor(wk)} 周前`;
+  const mo = day / 30;
+  return `${Math.floor(mo)} 个月前`;
 }
 
 function formatDateLong(value: string) {

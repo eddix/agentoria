@@ -51,6 +51,10 @@ pub fn list_sessions() -> Result<Vec<SessionSummary>> {
 pub fn read_session_detail(path: &Path) -> Result<SessionDetail> {
     let index = read_index()?;
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let file_updated_at = metadata_timestamp(path).ok();
+    let indexed_updated_at = index
+        .get(&file_stem_id(path))
+        .and_then(|entry| entry.updated_at.as_deref());
 
     let mut summary = SessionSummary::empty(
         file_stem_id(path),
@@ -59,11 +63,13 @@ pub fn read_session_detail(path: &Path) -> Result<SessionDetail> {
     );
     let mut stats = SessionStats::new(
         path.to_string_lossy().into_owned(),
-        metadata_timestamp(path)?,
+        resolve_session_updated_at(None, file_updated_at.clone(), indexed_updated_at),
     );
 
     let mut events = Vec::new();
     let mut first_prompt: Option<String> = None;
+    let mut last_prompt: Option<String> = None;
+    let mut last_event_at: Option<String> = None;
     let mut current_model: Option<String> = None;
     let mut current_cwd: Option<String> = None;
 
@@ -83,6 +89,14 @@ pub fn read_session_detail(path: &Path) -> Result<SessionDetail> {
             .and_then(Value::as_str)
             .map(ToOwned::to_owned);
         let payload = value.get("payload");
+        update_latest_timestamp(
+            &mut last_event_at,
+            top_timestamp.as_deref().or_else(|| {
+                payload
+                    .and_then(|item| item.get("timestamp"))
+                    .and_then(Value::as_str)
+            }),
+        );
         let payload_type = payload
             .and_then(|p| p.get("type"))
             .and_then(Value::as_str)
@@ -137,7 +151,9 @@ pub fn read_session_detail(path: &Path) -> Result<SessionDetail> {
                     });
                 }
             }
-            "compacted" | "event_msg" if payload_type == "context_compacted" || top_type == "compacted" => {
+            "compacted" | "event_msg"
+                if payload_type == "context_compacted" || top_type == "compacted" =>
+            {
                 let summary_text = payload
                     .and_then(|p| p.get("summary"))
                     .or_else(|| value.get("summary"))
@@ -147,7 +163,11 @@ pub fn read_session_detail(path: &Path) -> Result<SessionDetail> {
                 events.push(SessionEvent::Compaction {
                     meta: EventMeta::new(
                         format!("codex-compact-{line_no}"),
-                        if top_type == "compacted" { "compacted" } else { "context_compacted" },
+                        if top_type == "compacted" {
+                            "compacted"
+                        } else {
+                            "context_compacted"
+                        },
                     )
                     .with_timestamp(top_timestamp.clone()),
                     summary: summary_text,
@@ -165,6 +185,9 @@ pub fn read_session_detail(path: &Path) -> Result<SessionDetail> {
                     }
                     if first_prompt.is_none() {
                         first_prompt = Some(text.clone());
+                    }
+                    if is_meaningful_prompt(&text) {
+                        last_prompt = Some(text.clone());
                     }
                     stats.user_count += 1;
                     stats.content_chars += text.chars().count();
@@ -208,11 +231,8 @@ pub fn read_session_detail(path: &Path) -> Result<SessionDetail> {
                     stats.reasoning_count += 1;
                     stats.content_chars += text.chars().count();
                     events.push(SessionEvent::Reasoning {
-                        meta: EventMeta::new(
-                            format!("codex-areason-{line_no}"),
-                            "agent_reasoning",
-                        )
-                        .with_timestamp(top_timestamp.clone()),
+                        meta: EventMeta::new(format!("codex-areason-{line_no}"), "agent_reasoning")
+                            .with_timestamp(top_timestamp.clone()),
                         text,
                         encrypted: false,
                     });
@@ -303,8 +323,11 @@ pub fn read_session_detail(path: &Path) -> Result<SessionDetail> {
                     if role != "assistant" {
                         continue;
                     }
-                    let text =
-                        extract_codex_text(payload.and_then(|p| p.get("content")).unwrap_or(&Value::Null));
+                    let text = extract_codex_text(
+                        payload
+                            .and_then(|p| p.get("content"))
+                            .unwrap_or(&Value::Null),
+                    );
                     let Some(text) = text else { continue };
                     if text.is_empty() {
                         continue;
@@ -341,9 +364,13 @@ pub fn read_session_detail(path: &Path) -> Result<SessionDetail> {
                         .map(|s| !s.is_empty())
                         .unwrap_or(false);
 
-                    let text = content_text
-                        .or(summary_text)
-                        .unwrap_or_else(|| if has_encrypted { "(encrypted reasoning)".to_string() } else { String::new() });
+                    let text = content_text.or(summary_text).unwrap_or_else(|| {
+                        if has_encrypted {
+                            "(encrypted reasoning)".to_string()
+                        } else {
+                            String::new()
+                        }
+                    });
                     if text.is_empty() {
                         continue;
                     }
@@ -401,7 +428,11 @@ pub fn read_session_detail(path: &Path) -> Result<SessionDetail> {
                         .map(ToOwned::to_owned);
                     let output_raw = payload
                         .and_then(|p| p.get("output"))
-                        .and_then(|v| v.as_str().map(ToOwned::to_owned).or_else(|| Some(pretty_json(v))))
+                        .and_then(|v| {
+                            v.as_str()
+                                .map(ToOwned::to_owned)
+                                .or_else(|| Some(pretty_json(v)))
+                        })
                         .unwrap_or_default();
                     let (content, _truncated) = truncate_chars(&output_raw, RESULT_TRUNCATE_CHARS);
                     let is_error = payload
@@ -478,16 +509,23 @@ pub fn read_session_detail(path: &Path) -> Result<SessionDetail> {
     }
 
     let indexed = index.get(&summary.id).cloned().unwrap_or_default();
-    summary.title = indexed
-        .title
-        .clone()
+    let recap = indexed.title.clone();
+    summary.title = clean_title(recap.as_deref())
+        .or_else(|| clean_title(last_prompt.as_deref()))
         .or_else(|| clean_title(first_prompt.as_deref()))
         .unwrap_or_else(|| summary.id.clone());
-    summary.preview = clean_preview(first_prompt.as_deref().unwrap_or(""));
-    summary.updated_at = indexed
-        .updated_at
-        .clone()
-        .unwrap_or_else(|| stats.updated_at.clone());
+    summary.preview = last_prompt
+        .as_deref()
+        .or(recap.as_deref())
+        .or(first_prompt.as_deref())
+        .map(clean_preview)
+        .unwrap_or_default();
+    summary.updated_at = resolve_session_updated_at(
+        last_event_at,
+        file_updated_at,
+        indexed.updated_at.as_deref(),
+    );
+    stats.updated_at = summary.updated_at.clone();
     summary.is_partial = false;
 
     Ok(SessionDetail {
@@ -507,10 +545,12 @@ fn scan_summary(
         SessionSource::Codex,
         path.to_string_lossy().into_owned(),
     );
-    summary.updated_at = metadata_timestamp(path)?;
+    let file_updated_at = metadata_timestamp(path).ok();
 
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let mut first_prompt: Option<String> = None;
+    let mut last_prompt: Option<String> = None;
+    let mut last_event_at: Option<String> = None;
     let mut user_count = 0usize;
     let mut assistant_count = 0usize;
     let mut tool_call_count = 0usize;
@@ -529,6 +569,14 @@ fn scan_summary(
 
         let top_type = value.get("type").and_then(Value::as_str).unwrap_or("");
         let payload = value.get("payload");
+        update_latest_timestamp(
+            &mut last_event_at,
+            value.get("timestamp").and_then(Value::as_str).or_else(|| {
+                payload
+                    .and_then(|item| item.get("timestamp"))
+                    .and_then(Value::as_str)
+            }),
+        );
         let payload_type = payload
             .and_then(|p| p.get("type"))
             .and_then(Value::as_str)
@@ -553,25 +601,27 @@ fn scan_summary(
             "event_msg" => match payload_type {
                 "user_message" => {
                     user_count += 1;
-                    if first_prompt.is_none() {
-                        first_prompt = payload
-                            .and_then(|p| p.get("message"))
-                            .and_then(Value::as_str)
-                            .map(ToOwned::to_owned);
+                    let message = payload
+                        .and_then(|p| p.get("message"))
+                        .and_then(Value::as_str);
+                    if let Some(text) = message {
+                        if first_prompt.is_none() {
+                            first_prompt = Some(text.to_string());
+                        }
+                        if is_meaningful_prompt(text) {
+                            last_prompt = Some(text.to_string());
+                        }
                     }
                 }
                 "agent_message" => assistant_count += 1,
                 _ => {}
             },
             "response_item" => match payload_type {
-                "message" => {
-                    if payload
-                        .and_then(|p| p.get("role"))
-                        .and_then(Value::as_str)
-                        == Some("assistant")
-                    {
-                        assistant_count += 1;
-                    }
+                "message"
+                    if payload.and_then(|p| p.get("role")).and_then(Value::as_str)
+                        == Some("assistant") =>
+                {
+                    assistant_count += 1;
                 }
                 "function_call" | "custom_tool_call" | "web_search_call" => {
                     tool_call_count += 1;
@@ -582,17 +632,26 @@ fn scan_summary(
         }
     }
 
-    let indexed = indexed.cloned().or_else(|| index.get(&summary.id).cloned()).unwrap_or_default();
-    summary.title = indexed
-        .title
-        .clone()
+    let indexed = indexed
+        .cloned()
+        .or_else(|| index.get(&summary.id).cloned())
+        .unwrap_or_default();
+    let recap = indexed.title.clone();
+    summary.title = clean_title(recap.as_deref())
+        .or_else(|| clean_title(last_prompt.as_deref()))
         .or_else(|| clean_title(first_prompt.as_deref()))
         .unwrap_or_else(|| summary.id.clone());
-    summary.preview = clean_preview(first_prompt.as_deref().unwrap_or(""));
-    summary.updated_at = indexed
-        .updated_at
-        .clone()
-        .unwrap_or_else(|| summary.updated_at.clone());
+    summary.preview = last_prompt
+        .as_deref()
+        .or(recap.as_deref())
+        .or(first_prompt.as_deref())
+        .map(clean_preview)
+        .unwrap_or_default();
+    summary.updated_at = resolve_session_updated_at(
+        last_event_at,
+        file_updated_at,
+        indexed.updated_at.as_deref(),
+    );
     summary.working_dir = current_cwd;
     if summary.model.is_none() {
         summary.model = current_model;
@@ -653,7 +712,8 @@ fn extract_codex_text(value: &Value) -> Option<String> {
             let mut parts = Vec::new();
             for item in items {
                 match item.get("type").and_then(Value::as_str) {
-                    Some("output_text") | Some("input_text") | Some("summary_text") | Some("text") => {
+                    Some("output_text") | Some("input_text") | Some("summary_text")
+                    | Some("text") => {
                         if let Some(text) = item.get("text").and_then(Value::as_str) {
                             let trimmed = text.trim();
                             if !trimmed.is_empty() {

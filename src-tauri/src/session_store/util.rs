@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::Value;
 
 pub fn home_dir() -> Result<PathBuf> {
@@ -26,6 +26,51 @@ pub fn metadata_timestamp(path: &Path) -> Result<String> {
         .modified()
         .context("failed to read modified time")?;
     Ok(DateTime::<Utc>::from(modified).to_rfc3339())
+}
+
+pub fn update_latest_timestamp(latest: &mut Option<String>, candidate: Option<&str>) {
+    let Some(candidate) = candidate else {
+        return;
+    };
+    let Ok(candidate_at) = DateTime::parse_from_rfc3339(candidate) else {
+        return;
+    };
+
+    let should_replace = match latest
+        .as_deref()
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+    {
+        Some(latest_at) => candidate_at > latest_at,
+        None => true,
+    };
+
+    if should_replace {
+        *latest = Some(
+            candidate_at
+                .with_timezone(&Utc)
+                .to_rfc3339_opts(SecondsFormat::Millis, true),
+        );
+    }
+}
+
+pub fn resolve_session_updated_at(
+    last_event: Option<String>,
+    file_modified: Option<String>,
+    indexed: Option<&str>,
+) -> String {
+    last_event
+        .or(file_modified)
+        .or_else(|| indexed.map(ToOwned::to_owned))
+        .map(|value| {
+            DateTime::parse_from_rfc3339(&value)
+                .map(|timestamp| {
+                    timestamp
+                        .with_timezone(&Utc)
+                        .to_rfc3339_opts(SecondsFormat::Millis, true)
+                })
+                .unwrap_or(value)
+        })
+        .unwrap_or_default()
 }
 
 pub fn join_error_to_string(error: impl std::fmt::Display) -> String {
@@ -61,6 +106,25 @@ pub fn clean_preview(raw: &str) -> String {
         .collect()
 }
 
+/// Whether a user prompt carries real signal — used to pick the "last prompt"
+/// for titles/previews, skipping slash-commands, command markup, and throwaway
+/// acks like "继续" / "ok".
+pub fn is_meaningful_prompt(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.starts_with('/') {
+        return false;
+    }
+    // Claude wraps invoked slash-commands as <command-name>…</command-name>,
+    // and echoes local command output as <local-command-stdout>…
+    if trimmed.starts_with("<command-") || trimmed.starts_with("<local-command") {
+        return false;
+    }
+    trimmed.chars().count() > 3
+}
+
 pub fn file_stem_id(path: &Path) -> String {
     let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
         return "session".to_string();
@@ -92,14 +156,46 @@ pub fn pretty_json(value: &Value) -> String {
 
 pub fn truncate_chars(input: &str, limit: usize) -> (String, bool) {
     let mut out = String::new();
-    let mut count = 0;
-    for ch in input.chars() {
+    for (count, ch) in input.chars().enumerate() {
         if count >= limit {
             return (out, true);
         }
         out.push(ch);
-        count += 1;
     }
     (out, false)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{resolve_session_updated_at, update_latest_timestamp};
+
+    #[test]
+    fn update_latest_timestamp_keeps_the_newest_valid_event() {
+        let mut latest = None;
+
+        update_latest_timestamp(&mut latest, Some("2026-07-29T09:59:06.895Z"));
+        update_latest_timestamp(&mut latest, Some("invalid"));
+        update_latest_timestamp(&mut latest, Some("2026-07-28T10:00:00Z"));
+
+        assert_eq!(latest.as_deref(), Some("2026-07-29T09:59:06.895Z"));
+    }
+
+    #[test]
+    fn resolve_session_updated_at_prefers_event_then_mtime_then_index() {
+        let updated_at = resolve_session_updated_at(
+            Some("2026-07-29T09:59:06.895Z".to_string()),
+            Some("2026-07-30T10:00:00Z".to_string()),
+            Some("2026-07-31T10:00:00Z"),
+        );
+
+        assert_eq!(updated_at, "2026-07-29T09:59:06.895Z");
+    }
+
+    #[test]
+    fn resolve_session_updated_at_falls_back_to_index_without_file_times() {
+        let updated_at =
+            resolve_session_updated_at(None, None, Some("2026-07-24T05:46:05.538863Z"));
+
+        assert_eq!(updated_at, "2026-07-24T05:46:05.538Z");
+    }
+}
