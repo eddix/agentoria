@@ -64,7 +64,6 @@ impl SessionView {
             list_state.set_follow_mode(FollowMode::Tail);
         }
         let weak = cx.weak_entity();
-        let scroll_state = list_state.clone();
         let on_scroll = Rc::new(on_scroll);
         let scroll_callback = on_scroll.clone();
         list_state.set_scroll_handler(move |event, window, cx| {
@@ -73,11 +72,10 @@ impl SessionView {
                 view.show_jump_to_bottom = !event.is_following_tail;
                 view.load_visible_bodies(cx);
             });
-            let offset = scroll_state.logical_scroll_top();
             scroll_callback(
                 ScrollAnchor {
-                    item_index: offset.item_ix,
-                    offset_in_item: offset.offset_in_item.as_f32(),
+                    item_index: event.visible_range.start,
+                    offset_in_item: 0.,
                     is_following_tail: event.is_following_tail,
                 },
                 window,
@@ -512,17 +510,140 @@ fn format_bytes(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{
+        collections::{HashMap, HashSet, VecDeque},
+        path::PathBuf,
+        rc::Rc,
+        time::Instant,
+    };
 
-    use gpui::{AppContext as _, TestAppContext};
-    use sessionary_core::{index::IndexedFile, SessionSource};
+    use gpui::{
+        point, px, AppContext as _, FollowMode, ListAlignment, ListState, ScrollDelta,
+        ScrollWheelEvent, TestAppContext, VisualTestContext,
+    };
+    use sessionary_core::{
+        index::{
+            ConversationBody, ConversationKind, ConversationMessage, IndexedFile, IndexedLine,
+        },
+        SessionSource,
+    };
 
     use super::SessionView;
 
     #[gpui::test]
     fn session_view_starts_at_tail_and_toggles_markdown(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
-        let file = IndexedFile {
+        let file = test_file(0);
+        let view = cx.update(|cx| {
+            cx.new(|cx| SessionView::new(file, Vec::new(), Vec::new(), None, |_, _, _| {}, cx))
+        });
+
+        view.read_with(cx, |view, _| {
+            assert!(view.render_markdown);
+            assert!(!view.show_jump_to_bottom);
+        });
+        view.update(cx, |view, cx| view.toggle_markdown(cx));
+        view.read_with(cx, |view, _| assert!(!view.render_markdown));
+    }
+
+    #[gpui::test]
+    fn transcript_scroll_p95_stays_within_one_frame(cx: &mut TestAppContext) {
+        const ROWS: usize = 1_000;
+        const SAMPLES: usize = 40;
+
+        cx.update(gpui_component::init);
+        let file = test_file(ROWS);
+        let lines = (0..ROWS)
+            .map(|index| IndexedLine {
+                file_id: file.id,
+                source: SessionSource::Codex,
+                path: PathBuf::from("/tmp/performance.jsonl"),
+                ordinal: index as u64,
+                line_number: index as u64 + 1,
+                byte_offset: 0,
+                byte_len: 2_048,
+                event_type: "event_msg.agent_message".to_string(),
+                timestamp: Some("2026-08-28T01:00:00.000Z".to_string()),
+                conversation_kind: Some(ConversationKind::Assistant),
+                process_count: 0,
+            })
+            .collect::<Vec<_>>();
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|_| {
+                let list_state = ListState::new(ROWS, ListAlignment::Bottom, px(1200.))
+                    .with_uniform_item_height(px(180.));
+                list_state.set_follow_mode(FollowMode::Tail);
+                let mut view = SessionView {
+                    file,
+                    conversation_lines: lines,
+                    process_lines: Vec::new(),
+                    list_state,
+                    bodies: HashMap::new(),
+                    loading: HashSet::new(),
+                    cache_order: VecDeque::new(),
+                    cached_source_bytes: 0,
+                    visible_range: ROWS.saturating_sub(16)..ROWS,
+                    render_markdown: true,
+                    show_jump_to_bottom: false,
+                    on_scroll: Rc::new(|_, _, _| {}),
+                };
+                let markdown =
+                    "## Result\n\n- first item\n- second item\n\n```rust\nfn main() {}\n```";
+                for index in 0..ROWS {
+                    view.bodies.insert(
+                        index,
+                        ConversationBody::Loaded(ConversationMessage {
+                            kind: ConversationKind::Assistant,
+                            text: markdown.to_string(),
+                            model: Some("test".to_string()),
+                            stop_reason: None,
+                            source_bytes: markdown.len() as u64,
+                        }),
+                    );
+                }
+                view
+            });
+            gpui_component::Root::new(view, window, cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+        draw(cx);
+
+        for _ in 0..8 {
+            scroll_and_draw(cx);
+        }
+        let mut samples = Vec::with_capacity(SAMPLES);
+        for _ in 0..SAMPLES {
+            let started = Instant::now();
+            scroll_and_draw(cx);
+            samples.push(started.elapsed().as_secs_f64() * 1000.);
+        }
+        samples.sort_by(f64::total_cmp);
+        let p95 = samples[((SAMPLES as f64 * 0.95).ceil() as usize).saturating_sub(1)];
+        let max = *samples.last().unwrap_or(&0.);
+        eprintln!("session transcript scroll p95={p95:.2}ms max={max:.2}ms");
+        if !cfg!(debug_assertions) {
+            assert!(p95 <= 16., "scroll p95 {p95:.2}ms exceeds 16ms");
+        }
+    }
+
+    fn draw(cx: &mut VisualTestContext) {
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    }
+
+    fn scroll_and_draw(cx: &mut VisualTestContext) {
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(600.), px(400.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(180.))),
+            ..Default::default()
+        });
+        draw(cx);
+    }
+
+    fn test_file(assistant_count: usize) -> IndexedFile {
+        IndexedFile {
             id: 1,
             source: SessionSource::Codex,
             path: PathBuf::from("/tmp/session.jsonl"),
@@ -531,7 +652,7 @@ mod tests {
             pending_bytes: 0,
             line_count: 0,
             user_count: 0,
-            assistant_count: 0,
+            assistant_count: assistant_count as u64,
             process_count: 0,
             error_count: 0,
             started_at: None,
@@ -543,16 +664,6 @@ mod tests {
             model: None,
             parent_session_id: None,
             is_sidechain: false,
-        };
-        let view = cx.update(|cx| {
-            cx.new(|cx| SessionView::new(file, Vec::new(), Vec::new(), None, |_, _, _| {}, cx))
-        });
-
-        view.read_with(cx, |view, _| {
-            assert!(view.render_markdown);
-            assert!(!view.show_jump_to_bottom);
-        });
-        view.update(cx, |view, cx| view.toggle_markdown(cx));
-        view.read_with(cx, |view, _| assert!(!view.render_markdown));
+        }
     }
 }
