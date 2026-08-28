@@ -21,6 +21,33 @@ struct IndexEntry {
     updated_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssistantRecordSource {
+    AgentMessage,
+    ResponseItem,
+}
+
+#[derive(Debug)]
+struct AssistantRecord {
+    source: AssistantRecordSource,
+    text: String,
+    id: Option<String>,
+    stop_reason: Option<String>,
+}
+
+impl AssistantRecord {
+    fn source_type(&self) -> &'static str {
+        match self.source {
+            AssistantRecordSource::AgentMessage => "agent_message",
+            AssistantRecordSource::ResponseItem => "response_item.message",
+        }
+    }
+
+    fn duplicates(&self, previous: &Self) -> bool {
+        self.source != previous.source && self.text == previous.text
+    }
+}
+
 pub fn list_sessions() -> Result<Vec<SessionSummary>> {
     let index = read_index()?;
     let sessions_root = codex_root()?.join("sessions");
@@ -72,15 +99,20 @@ pub fn read_session_detail(path: &Path) -> Result<SessionDetail> {
     let mut last_event_at: Option<String> = None;
     let mut current_model: Option<String> = None;
     let mut current_cwd: Option<String> = None;
+    let mut previous_assistant: Option<AssistantRecord> = None;
 
     for (line_no, line) in BufReader::new(file).lines().enumerate() {
         let line = line?;
         if line.trim().is_empty() {
+            previous_assistant = None;
             continue;
         }
         let value: Value = match serde_json::from_str(&line) {
             Ok(value) => value,
-            Err(_) => continue,
+            Err(_) => {
+                previous_assistant = None;
+                continue;
+            }
         };
 
         let top_type = value.get("type").and_then(Value::as_str).unwrap_or("");
@@ -101,6 +133,34 @@ pub fn read_session_detail(path: &Path) -> Result<SessionDetail> {
             .and_then(|p| p.get("type"))
             .and_then(Value::as_str)
             .unwrap_or("");
+
+        if let Some(record) = extract_assistant_record(&value) {
+            let is_duplicate = previous_assistant
+                .as_ref()
+                .is_some_and(|previous| record.duplicates(previous));
+
+            if !is_duplicate {
+                stats.assistant_count += 1;
+                stats.content_chars += record.text.chars().count();
+                events.push(SessionEvent::AssistantMessage {
+                    meta: EventMeta::new(
+                        record
+                            .id
+                            .clone()
+                            .unwrap_or_else(|| format!("codex-agent-{line_no}")),
+                        record.source_type(),
+                    )
+                    .with_timestamp(top_timestamp.clone()),
+                    text: record.text.clone(),
+                    model: current_model.clone(),
+                    stop_reason: record.stop_reason.clone(),
+                });
+            }
+
+            previous_assistant = Some(record);
+            continue;
+        }
+        previous_assistant = None;
 
         match top_type {
             "session_meta" => {
@@ -197,28 +257,7 @@ pub fn read_session_detail(path: &Path) -> Result<SessionDetail> {
                         text,
                     });
                 }
-                "agent_message" => {
-                    let text = payload
-                        .and_then(|p| p.get("message"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
-                    if text.is_empty() {
-                        continue;
-                    }
-                    stats.assistant_count += 1;
-                    stats.content_chars += text.chars().count();
-                    events.push(SessionEvent::AssistantMessage {
-                        meta: EventMeta::new(format!("codex-agent-{line_no}"), "agent_message")
-                            .with_timestamp(top_timestamp.clone()),
-                        text,
-                        model: current_model.clone(),
-                        stop_reason: payload
-                            .and_then(|p| p.get("phase"))
-                            .and_then(Value::as_str)
-                            .map(ToOwned::to_owned),
-                    });
-                }
+                "agent_message" => {}
                 "agent_reasoning" => {
                     let text = payload
                         .and_then(|p| p.get("text").or_else(|| p.get("message")))
@@ -315,40 +354,7 @@ pub fn read_session_detail(path: &Path) -> Result<SessionDetail> {
                 }
             },
             "response_item" => match payload_type {
-                "message" => {
-                    let role = payload
-                        .and_then(|p| p.get("role"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("");
-                    if role != "assistant" {
-                        continue;
-                    }
-                    let text = extract_codex_text(
-                        payload
-                            .and_then(|p| p.get("content"))
-                            .unwrap_or(&Value::Null),
-                    );
-                    let Some(text) = text else { continue };
-                    if text.is_empty() {
-                        continue;
-                    }
-                    stats.assistant_count += 1;
-                    stats.content_chars += text.chars().count();
-                    events.push(SessionEvent::AssistantMessage {
-                        meta: EventMeta::new(
-                            payload
-                                .and_then(|p| p.get("id"))
-                                .and_then(Value::as_str)
-                                .map(ToOwned::to_owned)
-                                .unwrap_or_else(|| format!("codex-msg-{line_no}")),
-                            "response_item.message",
-                        )
-                        .with_timestamp(top_timestamp.clone()),
-                        text,
-                        model: current_model.clone(),
-                        stop_reason: None,
-                    });
-                }
+                "message" => {}
                 "reasoning" => {
                     let summary_text = payload
                         .and_then(|p| p.get("summary"))
@@ -556,15 +562,20 @@ fn scan_summary(
     let mut tool_call_count = 0usize;
     let mut current_model: Option<String> = None;
     let mut current_cwd: Option<String> = None;
+    let mut previous_assistant_source: Option<AssistantRecordSource> = None;
 
     for line in BufReader::new(file).lines() {
         let line = line?;
         if line.trim().is_empty() {
+            previous_assistant_source = None;
             continue;
         }
         let value: Value = match serde_json::from_str(&line) {
             Ok(value) => value,
-            Err(_) => continue,
+            Err(_) => {
+                previous_assistant_source = None;
+                continue;
+            }
         };
 
         let top_type = value.get("type").and_then(Value::as_str).unwrap_or("");
@@ -581,6 +592,16 @@ fn scan_summary(
             .and_then(|p| p.get("type"))
             .and_then(Value::as_str)
             .unwrap_or("");
+
+        if let Some(source) = assistant_record_source(&value) {
+            let is_duplicate = previous_assistant_source.is_some_and(|previous| source != previous);
+            if !is_duplicate {
+                assistant_count += 1;
+            }
+            previous_assistant_source = Some(source);
+            continue;
+        }
+        previous_assistant_source = None;
 
         match top_type {
             "session_meta" => {
@@ -613,16 +634,11 @@ fn scan_summary(
                         }
                     }
                 }
-                "agent_message" => assistant_count += 1,
+                "agent_message" => {}
                 _ => {}
             },
             "response_item" => match payload_type {
-                "message"
-                    if payload.and_then(|p| p.get("role")).and_then(Value::as_str)
-                        == Some("assistant") =>
-                {
-                    assistant_count += 1;
-                }
+                "message" => {}
                 "function_call" | "custom_tool_call" | "web_search_call" => {
                     tool_call_count += 1;
                 }
@@ -695,6 +711,55 @@ fn apply_session_meta(
         summary.is_sidechain = true;
     } else if let Some(forked) = payload.get("forked_from_id").and_then(Value::as_str) {
         summary.parent_session_id = Some(forked.to_string());
+    }
+}
+
+fn extract_assistant_record(value: &Value) -> Option<AssistantRecord> {
+    let payload = value.get("payload")?;
+    match assistant_record_source(value)? {
+        AssistantRecordSource::AgentMessage => {
+            let text = payload.get("message").and_then(Value::as_str)?;
+            if text.is_empty() {
+                return None;
+            }
+            Some(AssistantRecord {
+                source: AssistantRecordSource::AgentMessage,
+                text: text.to_string(),
+                id: None,
+                stop_reason: payload
+                    .get("phase")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+            })
+        }
+        AssistantRecordSource::ResponseItem => {
+            let text = extract_codex_text(payload.get("content").unwrap_or(&Value::Null))?;
+            Some(AssistantRecord {
+                source: AssistantRecordSource::ResponseItem,
+                text,
+                id: payload
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                stop_reason: None,
+            })
+        }
+    }
+}
+
+fn assistant_record_source(value: &Value) -> Option<AssistantRecordSource> {
+    let top_type = value.get("type").and_then(Value::as_str)?;
+    let payload = value.get("payload")?;
+    let payload_type = payload.get("type").and_then(Value::as_str)?;
+
+    match (top_type, payload_type) {
+        ("event_msg", "agent_message") => Some(AssistantRecordSource::AgentMessage),
+        ("response_item", "message")
+            if payload.get("role").and_then(Value::as_str) == Some("assistant") =>
+        {
+            Some(AssistantRecordSource::ResponseItem)
+        }
+        _ => None,
     }
 }
 
@@ -839,4 +904,57 @@ fn build_path_index(root: &Path) -> HashMap<String, PathBuf> {
         entries.insert(file_stem_id(path), path.to_path_buf());
     }
     entries
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::extract_assistant_record;
+
+    #[test]
+    fn assistant_record_deduplicates_adjacent_alternate_sources() {
+        let event_message = extract_assistant_record(&json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "agent_message",
+                "message": "same answer"
+            }
+        }))
+        .expect("agent message should parse");
+        let response_item = extract_assistant_record(&json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "same answer"}]
+            }
+        }))
+        .expect("response item should parse");
+
+        assert!(response_item.duplicates(&event_message));
+    }
+
+    #[test]
+    fn assistant_record_keeps_different_answers() {
+        let event_message = extract_assistant_record(&json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "agent_message",
+                "message": "first answer"
+            }
+        }))
+        .expect("agent message should parse");
+        let response_item = extract_assistant_record(&json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "second answer"}]
+            }
+        }))
+        .expect("response item should parse");
+
+        assert!(!response_item.duplicates(&event_message));
+    }
 }

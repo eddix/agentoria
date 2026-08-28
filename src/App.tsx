@@ -9,6 +9,7 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
+  Activity,
   ArrowDownToLine,
   Bot,
   Brain,
@@ -32,6 +33,7 @@ import {
   MoonStar,
   Network,
   Paperclip,
+  PanelRightOpen,
   RefreshCcw,
   Scissors,
   ShieldAlert,
@@ -55,6 +57,13 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { applyTheme, persistTheme, resolveInitialTheme, type ThemeMode } from "@/lib/theme";
 import {
@@ -961,6 +970,25 @@ function MessageSkeleton() {
   );
 }
 
+type ConversationEvent = Extract<
+  SessionEvent,
+  { kind: "user" | "assistant_message" }
+>;
+
+type TranscriptItem =
+  | { kind: "message"; event: ConversationEvent }
+  | { kind: "process_summary" };
+
+interface ProcessSummary {
+  total: number;
+  reasoning: number;
+  toolCalls: number;
+  toolResults: number;
+  tokens: number;
+  context: number;
+  system: number;
+}
+
 function EventStream({
   events,
   sessionPath,
@@ -972,17 +1000,54 @@ function EventStream({
 }) {
   const parentRef = useRef<HTMLDivElement | null>(null);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
+  const [processDetailsOpen, setProcessDetailsOpen] = useState(false);
   const renderMode = renderMarkdown ? "markdown" : "raw";
+  const { transcriptItems, processEvents, processSummary } = useMemo(() => {
+    const messages: ConversationEvent[] = [];
+    const process: SessionEvent[] = [];
+
+    for (const event of events) {
+      if (isConversationEvent(event)) {
+        messages.push(event);
+      } else {
+        process.push(event);
+      }
+    }
+
+    const items: TranscriptItem[] = messages.map((event) => ({
+      kind: "message",
+      event,
+    }));
+    if (process.length > 0) {
+      items.unshift({ kind: "process_summary" });
+    }
+
+    return {
+      transcriptItems: items,
+      processEvents: process,
+      processSummary: summarizeProcessEvents(process),
+    };
+  }, [events]);
 
   // sessionPath in the key forces a fresh virtualizer when the user switches sessions,
   // so cached measurements from the previous transcript don't bleed in.
   const virtualizer = useVirtualizer({
-    count: events.length,
+    count: transcriptItems.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: (index) => estimateEventHeight(events[index]),
+    estimateSize: (index) => {
+      const item = transcriptItems[index];
+      return item.kind === "process_summary"
+        ? 72
+        : estimateEventHeight(item.event);
+    },
     overscan: 6,
     measureElement: (el) => el.getBoundingClientRect().height,
-    getItemKey: (index) => `${renderMode}:${sessionPath}:${events[index].id}:${index}`,
+    getItemKey: (index) => {
+      const item = transcriptItems[index];
+      return item.kind === "process_summary"
+        ? `${sessionPath}:process-summary`
+        : `${renderMode}:${sessionPath}:${item.event.id}:${index}`;
+    },
   });
 
   const items = virtualizer.getVirtualItems();
@@ -1002,6 +1067,10 @@ function EventStream({
     return () => window.cancelAnimationFrame(frame);
   }, [renderMode, sessionPath, totalSize]);
 
+  useEffect(() => {
+    setProcessDetailsOpen(false);
+  }, [sessionPath]);
+
   return (
     <div className="relative h-full">
       <div
@@ -1015,7 +1084,7 @@ function EventStream({
           style={{ height: `${totalSize}px` }}
         >
           {items.map((virtualRow) => {
-            const event = events[virtualRow.index];
+            const item = transcriptItems[virtualRow.index];
             return (
               <div
                 key={virtualRow.key}
@@ -1024,7 +1093,17 @@ function EventStream({
                 className="absolute left-0 right-0 border-b border-border"
                 style={{ transform: `translateY(${virtualRow.start}px)` }}
               >
-                <EventRow event={event} renderMarkdown={renderMarkdown} />
+                {item.kind === "process_summary" ? (
+                  <ProcessSummaryRow
+                    summary={processSummary}
+                    onOpen={() => setProcessDetailsOpen(true)}
+                  />
+                ) : (
+                  <EventRow
+                    event={item.event}
+                    renderMarkdown={renderMarkdown}
+                  />
+                )}
               </div>
             );
           })}
@@ -1036,16 +1115,208 @@ function EventStream({
           type="button"
           size="icon"
           variant="outline"
-          className="absolute bottom-4 right-5 z-20 rounded-full border-primary/35 bg-background/95 text-primary shadow-lg backdrop-blur hover:border-primary/60"
+          className="absolute bottom-4 left-1/2 z-20 -translate-x-1/2 rounded-full border-primary/35 bg-background/95 text-primary shadow-lg backdrop-blur hover:border-primary/60"
           onClick={() =>
-            virtualizer.scrollToIndex(events.length - 1, { align: "end" })
+            virtualizer.scrollToIndex(transcriptItems.length - 1, {
+              align: "end",
+            })
           }
           title="跳到会话底部"
           aria-label="跳到会话底部"
         >
-          <ArrowDownToLine className="h-4 w-4" />
+          <ArrowDownToLine data-icon="inline-start" />
         </Button>
       )}
+
+      <ProcessDetailsSheet
+        open={processDetailsOpen}
+        onOpenChange={setProcessDetailsOpen}
+        events={processEvents}
+        summary={processSummary}
+        sessionPath={sessionPath}
+        renderMarkdown={renderMarkdown}
+      />
+    </div>
+  );
+}
+
+function isConversationEvent(event: SessionEvent): event is ConversationEvent {
+  return event.kind === "user" || event.kind === "assistant_message";
+}
+
+function summarizeProcessEvents(events: SessionEvent[]): ProcessSummary {
+  const summary: ProcessSummary = {
+    total: events.length,
+    reasoning: 0,
+    toolCalls: 0,
+    toolResults: 0,
+    tokens: 0,
+    context: 0,
+    system: 0,
+  };
+
+  for (const event of events) {
+    switch (event.kind) {
+      case "reasoning":
+        summary.reasoning += 1;
+        break;
+      case "tool_call":
+        summary.toolCalls += 1;
+        break;
+      case "tool_result":
+        summary.toolResults += 1;
+        break;
+      case "token_usage":
+        summary.tokens += 1;
+        break;
+      case "turn_context":
+      case "compaction":
+        summary.context += 1;
+        break;
+      default:
+        summary.system += 1;
+    }
+  }
+
+  return summary;
+}
+
+function ProcessSummaryRow({
+  summary,
+  onOpen,
+}: {
+  summary: ProcessSummary;
+  onOpen: () => void;
+}) {
+  const parts = processSummaryParts(summary);
+
+  return (
+    <article className="flex min-h-[72px] items-center justify-between gap-4 border-l-2 border-l-border bg-muted/20 px-5 py-3">
+      <div className="flex min-w-0 items-center gap-3">
+        <Activity className="size-4 shrink-0 text-muted-foreground" />
+        <div className="min-w-0">
+          <div className="text-sm font-medium text-foreground">
+            {summary.total} 条过程信息已聚合
+          </div>
+          <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
+            {parts.join(" · ")}
+          </div>
+        </div>
+      </div>
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        className="shrink-0"
+        onClick={onOpen}
+      >
+        <PanelRightOpen data-icon="inline-start" />
+        查看详情
+      </Button>
+    </article>
+  );
+}
+
+function processSummaryParts(summary: ProcessSummary) {
+  return [
+    summary.reasoning > 0 ? `${summary.reasoning} reasoning` : null,
+    summary.toolCalls > 0 ? `${summary.toolCalls} tool calls` : null,
+    summary.toolResults > 0 ? `${summary.toolResults} results` : null,
+    summary.tokens > 0 ? `${summary.tokens} token updates` : null,
+    summary.context > 0 ? `${summary.context} context` : null,
+    summary.system > 0 ? `${summary.system} system` : null,
+  ].filter((part): part is string => part != null);
+}
+
+function ProcessDetailsSheet({
+  open,
+  onOpenChange,
+  events,
+  summary,
+  sessionPath,
+  renderMarkdown,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  events: SessionEvent[];
+  summary: ProcessSummary;
+  sessionPath: string;
+  renderMarkdown: boolean;
+}) {
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent
+        side="right"
+        className="flex w-[min(760px,94vw)] flex-col gap-0 p-0 sm:max-w-[760px]"
+      >
+        <SheetHeader className="border-b border-border px-5 py-4 pr-14">
+          <SheetTitle className="font-display">过程详情</SheetTitle>
+          <SheetDescription>
+            {summary.total} 条被聚合事件，按原始时间顺序展示。
+          </SheetDescription>
+          <div className="flex flex-wrap gap-2 pt-1">
+            {processSummaryParts(summary).map((part) => (
+              <Badge key={part} variant="outline">
+                {part}
+              </Badge>
+            ))}
+          </div>
+        </SheetHeader>
+        {open && (
+          <ProcessEventStream
+            events={events}
+            sessionPath={sessionPath}
+            renderMarkdown={renderMarkdown}
+          />
+        )}
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+function ProcessEventStream({
+  events,
+  sessionPath,
+  renderMarkdown,
+}: {
+  events: SessionEvent[];
+  sessionPath: string;
+  renderMarkdown: boolean;
+}) {
+  const parentRef = useRef<HTMLDivElement | null>(null);
+  const renderMode = renderMarkdown ? "markdown" : "raw";
+  const virtualizer = useVirtualizer({
+    count: events.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: (index) => estimateEventHeight(events[index]),
+    overscan: 5,
+    measureElement: (el) => el.getBoundingClientRect().height,
+    getItemKey: (index) =>
+      `${renderMode}:${sessionPath}:process:${events[index].id}:${index}`,
+  });
+  const items = virtualizer.getVirtualItems();
+
+  return (
+    <div ref={parentRef} className="min-h-0 flex-1 overflow-auto">
+      <div
+        className="relative w-full"
+        style={{ height: `${virtualizer.getTotalSize()}px` }}
+      >
+        {items.map((virtualRow) => (
+          <div
+            key={virtualRow.key}
+            data-index={virtualRow.index}
+            ref={virtualizer.measureElement}
+            className="absolute left-0 right-0 border-b border-border"
+            style={{ transform: `translateY(${virtualRow.start}px)` }}
+          >
+            <EventRow
+              event={events[virtualRow.index]}
+              renderMarkdown={renderMarkdown}
+            />
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
