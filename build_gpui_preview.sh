@@ -68,7 +68,7 @@ assemble_bundle() {
     "${SCRIPT_DIR}/crates/sessionary-gpui/Info.plist" \
     "${STAGING_APP}/Contents/Info.plist"
   install -m 644 \
-    "${SCRIPT_DIR}/src-tauri/icons/icon.icns" \
+    "${SCRIPT_DIR}/assets/icon.icns" \
     "${STAGING_APP}/Contents/Resources/icon.icns"
   codesign --force --deep --sign - "$STAGING_APP"
   codesign --verify --deep --strict --verbose=2 "$STAGING_APP"

@@ -9,10 +9,8 @@ yarn-error.log*
 .eslintcache
 .vite/
 
-# --- Rust / Cargo / Tauri backend ---
+# --- Rust / Cargo ---
 target/
-src-tauri/target/
-src-tauri/gen/schemas/
 
 # --- Runtime / app output ---
 log/

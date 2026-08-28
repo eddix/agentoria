@@ -35,14 +35,20 @@ pub enum SourceLoadEvent {
     Failed(String),
 }
 
-pub fn preview_data_dir() -> Result<PathBuf> {
+pub fn app_data_dir() -> Result<PathBuf> {
     dirs::data_dir()
         .context("failed to resolve Application Support directory")
-        .map(|root| root.join("Sessionary GPUI Preview"))
+        .map(|root| {
+            root.join(if crate::IS_PREVIEW {
+                "Sessionary GPUI Preview"
+            } else {
+                "Sessionary"
+            })
+        })
 }
 
-pub fn preview_index_path() -> Result<PathBuf> {
-    Ok(preview_data_dir()?.join("index.sqlite"))
+pub fn index_path() -> Result<PathBuf> {
+    Ok(app_data_dir()?.join("index.sqlite"))
 }
 
 pub fn run_source_load(

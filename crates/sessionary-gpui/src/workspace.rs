@@ -24,7 +24,7 @@ use sessionary_core::{
 };
 
 use crate::{
-    indexer::{preview_index_path, run_source_load, SourceLoadEvent},
+    indexer::{index_path, run_source_load, SourceLoadEvent},
     preferences::{Preferences, ThemePreference, ViewMode},
     session_view::SessionView,
 };
@@ -68,7 +68,7 @@ pub struct WorkspaceView {
 
 impl WorkspaceView {
     pub fn new(preferences: Preferences, cx: &mut Context<Self>) -> Self {
-        let index_path = preview_index_path().unwrap_or_else(|_| PathBuf::from("index.sqlite"));
+        let index_path = index_path().unwrap_or_else(|_| PathBuf::from("index.sqlite"));
         let source = preferences.source();
         let mut view = Self {
             source,
@@ -427,12 +427,14 @@ impl WorkspaceView {
                         .items_center()
                         .child(logo_mark(cx))
                         .child(div().font_semibold().child("Sessionary"))
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("GPUI PREVIEW"),
-                        ),
+                        .when(crate::IS_PREVIEW, |this| {
+                            this.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("GPUI PREVIEW"),
+                            )
+                        }),
                 )
                 .child(
                     h_flex()

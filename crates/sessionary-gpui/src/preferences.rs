@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sessionary_core::SessionSource;
 
-use crate::indexer::preview_data_dir;
+use crate::indexer::app_data_dir;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -112,7 +112,7 @@ impl Preferences {
 }
 
 fn preferences_path() -> Result<std::path::PathBuf> {
-    Ok(preview_data_dir()?.join("preferences.json"))
+    Ok(app_data_dir()?.join("preferences.json"))
 }
 
 #[cfg(test)]

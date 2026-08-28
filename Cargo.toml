@@ -2,7 +2,6 @@
 members = [
     "crates/sessionary-core",
     "crates/sessionary-gpui",
-    "src-tauri",
 ]
 resolver = "2"
 

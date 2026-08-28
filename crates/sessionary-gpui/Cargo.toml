@@ -8,6 +8,17 @@ description = "Native GPUI preview for Sessionary"
 [[bin]]
 name = "sessionary-gpui-preview"
 path = "src/main.rs"
+required-features = ["preview"]
+
+[[bin]]
+name = "sessionary-gpui"
+path = "src/formal.rs"
+required-features = ["formal"]
+
+[features]
+default = ["preview"]
+preview = []
+formal = []
 
 [dependencies]
 anyhow = "1"

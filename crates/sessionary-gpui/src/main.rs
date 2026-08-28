@@ -11,6 +11,19 @@ use gpui_component_assets::Assets;
 use preferences::{Preferences, ThemePreference};
 use workspace::WorkspaceView;
 
+#[cfg(not(any(feature = "preview", feature = "formal")))]
+compile_error!("either preview or formal feature must be enabled");
+
+#[cfg(feature = "formal")]
+pub(crate) const APP_ID: &str = "com.eddix.sessionary";
+#[cfg(not(feature = "formal"))]
+pub(crate) const APP_ID: &str = "com.eddix.sessionary.gpui-preview";
+
+#[cfg(feature = "formal")]
+pub(crate) const IS_PREVIEW: bool = false;
+#[cfg(not(feature = "formal"))]
+pub(crate) const IS_PREVIEW: bool = true;
+
 fn main() {
     let preferences = Preferences::load();
     gpui_platform::application()
@@ -34,7 +47,7 @@ fn main() {
                 ))),
                 window_min_size: Some(size(px(1120.), px(700.))),
                 titlebar: Some(TitleBar::title_bar_options()),
-                app_id: Some("com.eddix.sessionary.gpui-preview".to_string()),
+                app_id: Some(APP_ID.to_string()),
                 ..Default::default()
             };
             let preferences = preferences.clone();
