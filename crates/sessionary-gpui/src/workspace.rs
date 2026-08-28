@@ -16,7 +16,7 @@ use gpui_component::{
     progress::Progress,
     resizable::{h_resizable, resizable_panel, ResizableState},
     skeleton::Skeleton,
-    v_flex, ActiveTheme, IconName, Root, Sizable as _, StyledExt as _, Theme, ThemeMode, TitleBar,
+    v_flex, ActiveTheme, Icon, IconName, Root, Sizable as _, StyledExt as _, ThemeMode, TitleBar,
 };
 use sessionary_core::{
     index::{CancellationToken, IndexDatabase, IndexedFile},
@@ -25,8 +25,9 @@ use sessionary_core::{
 
 use crate::{
     indexer::{index_path, run_source_load, SourceLoadEvent},
-    preferences::{Preferences, ThemePreference, ViewMode},
+    preferences::{Preferences, ViewMode},
     session_view::SessionView,
+    themes,
 };
 
 #[derive(Debug, Clone)]
@@ -331,14 +332,20 @@ impl WorkspaceView {
     }
 
     fn toggle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (theme, mode) = if cx.theme().is_dark() {
-            (ThemePreference::Light, ThemeMode::Light)
+        let theme = if cx.theme().is_dark() {
+            self.preferences.light_theme.clone()
         } else {
-            (ThemePreference::Dark, ThemeMode::Dark)
+            self.preferences.dark_theme.clone()
         };
-        self.preferences.theme = theme;
+        self.select_theme(&theme, window, cx);
+    }
+
+    fn select_theme(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(mode) = themes::apply_theme(name, Some(window), cx) else {
+            return;
+        };
+        self.preferences.set_theme(name, mode.is_dark());
         self.schedule_preferences_save(cx);
-        Theme::change(mode, Some(window), cx);
         cx.notify();
     }
 
@@ -416,6 +423,9 @@ impl WorkspaceView {
     fn render_title_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let source = self.source;
         let source_weak = cx.weak_entity();
+        let theme_weak = cx.weak_entity();
+        let active_theme = cx.theme().theme_name().to_string();
+        let available_themes = themes::available_themes(cx);
         TitleBar::new().child(
             h_flex()
                 .size_full()
@@ -470,6 +480,63 @@ impl WorkspaceView {
                                 }),
                         )
                         .child(
+                            Button::new("theme-menu")
+                                .small()
+                                .outline()
+                                .icon(IconName::Palette)
+                                .label(active_theme.clone())
+                                .dropdown_caret(true)
+                                .tooltip("Select color theme")
+                                .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                                    let mut menu =
+                                        menu.max_h(px(620.)).scrollable(true).label("Light themes");
+                                    for (name, _) in available_themes
+                                        .iter()
+                                        .filter(|(_, mode)| *mode == ThemeMode::Light)
+                                    {
+                                        let weak = theme_weak.clone();
+                                        let selected_name = name.clone();
+                                        menu = menu.item(
+                                            PopupMenuItem::new(name.clone())
+                                                .icon(IconName::Sun)
+                                                .checked(*name == active_theme)
+                                                .on_click(move |_, window, cx| {
+                                                    let _ = weak.update(cx, |view, cx| {
+                                                        view.select_theme(
+                                                            &selected_name,
+                                                            window,
+                                                            cx,
+                                                        )
+                                                    });
+                                                }),
+                                        );
+                                    }
+                                    menu = menu.separator().label("Dark themes");
+                                    for (name, _) in available_themes
+                                        .iter()
+                                        .filter(|(_, mode)| *mode == ThemeMode::Dark)
+                                    {
+                                        let weak = theme_weak.clone();
+                                        let selected_name = name.clone();
+                                        menu = menu.item(
+                                            PopupMenuItem::new(name.clone())
+                                                .icon(IconName::Moon)
+                                                .checked(*name == active_theme)
+                                                .on_click(move |_, window, cx| {
+                                                    let _ = weak.update(cx, |view, cx| {
+                                                        view.select_theme(
+                                                            &selected_name,
+                                                            window,
+                                                            cx,
+                                                        )
+                                                    });
+                                                }),
+                                        );
+                                    }
+                                    menu
+                                }),
+                        )
+                        .child(
                             Button::new("theme-toggle")
                                 .small()
                                 .ghost()
@@ -496,7 +563,8 @@ impl WorkspaceView {
         v_flex()
             .size_full()
             .min_h_0()
-            .bg(cx.theme().background)
+            .bg(cx.theme().sidebar)
+            .text_color(cx.theme().sidebar_foreground)
             .child(
                 v_flex()
                     .flex_shrink_0()
@@ -504,7 +572,7 @@ impl WorkspaceView {
                     .px_4()
                     .py_3()
                     .border_b_1()
-                    .border_color(cx.theme().border)
+                    .border_color(cx.theme().sidebar_border)
                     .child(
                         div()
                             .text_xs()
@@ -587,28 +655,54 @@ impl WorkspaceView {
             let collapsed = self.collapsed_groups.contains(&key);
             return h_flex()
                 .id(SharedString::from(format!("session-group-{key}")))
+                .relative()
                 .w_full()
+                .min_h(px(42.))
                 .justify_between()
                 .gap_2()
                 .px_4()
                 .py_2()
                 .border_b_1()
-                .border_color(cx.theme().border)
-                .bg(cx.theme().muted.opacity(0.25))
+                .border_color(cx.theme().sidebar_border)
+                .bg(cx.theme().sidebar_accent)
+                .text_color(cx.theme().sidebar_accent_foreground)
                 .cursor_pointer()
-                .hover(|this| this.bg(cx.theme().muted.opacity(0.5)))
+                .hover(|this| this.bg(cx.theme().sidebar_primary.opacity(0.14)))
                 .on_click(cx.listener(move |view, _, _, cx| view.toggle_group(&key, cx)))
+                .child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top_0()
+                        .bottom_0()
+                        .w(px(3.))
+                        .bg(cx.theme().sidebar_primary),
+                )
                 .child(
                     h_flex()
                         .min_w_0()
                         .gap_2()
-                        .child(if collapsed { ">" } else { "v" })
-                        .child(div().truncate().text_xs().font_medium().child(label)),
+                        .child(
+                            Icon::new(if collapsed {
+                                IconName::ChevronRight
+                            } else {
+                                IconName::ChevronDown
+                            })
+                            .small(),
+                        )
+                        .child(Icon::new(IconName::Folder).small())
+                        .child(div().truncate().text_sm().font_semibold().child(label)),
                 )
                 .child(
                     div()
+                        .min_w(px(24.))
+                        .px_1()
+                        .py_0p5()
+                        .rounded_full()
+                        .bg(cx.theme().sidebar_primary.opacity(0.12))
                         .text_xs()
-                        .text_color(cx.theme().muted_foreground)
+                        .text_color(cx.theme().sidebar_primary)
+                        .text_center()
                         .child(count.to_string()),
                 )
                 .into_any_element();
@@ -626,10 +720,10 @@ impl WorkspaceView {
             .px_4()
             .py_3()
             .border_b_1()
-            .border_color(cx.theme().border)
+            .border_color(cx.theme().sidebar_border)
             .cursor_pointer()
-            .when(selected, |this| this.bg(cx.theme().primary.opacity(0.08)))
-            .hover(|this| this.bg(cx.theme().muted.opacity(0.45)))
+            .when(selected, |this| this.bg(cx.theme().sidebar_accent))
+            .hover(|this| this.bg(cx.theme().sidebar_accent.opacity(0.65)))
             .on_click(cx.listener(move |view, _, _, cx| view.select_session(file_id, cx)))
             .child(div().truncate().font_medium().text_sm().child(title))
             .child(

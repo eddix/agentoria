@@ -3,12 +3,13 @@ mod preferences;
 mod process_view;
 mod raw_view;
 mod session_view;
+mod themes;
 mod workspace;
 
 use gpui::{px, size, App, AppContext, Bounds, TaskExt, WindowBounds, WindowOptions};
-use gpui_component::{Theme, ThemeMode, TitleBar};
+use gpui_component::TitleBar;
 use gpui_component_assets::Assets;
-use preferences::{Preferences, ThemePreference};
+use preferences::Preferences;
 use workspace::WorkspaceView;
 
 #[cfg(not(any(feature = "preview", feature = "formal")))]
@@ -30,12 +31,13 @@ fn main() {
         .with_assets(Assets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
-            Theme::change(
-                match preferences.theme {
-                    ThemePreference::Light => ThemeMode::Light,
-                    ThemePreference::Dark => ThemeMode::Dark,
-                },
-                None,
+            if let Err(error) = themes::register_builtin_themes(cx) {
+                eprintln!("failed to register Sessionary themes: {error:#}");
+            }
+            themes::apply_saved_themes(
+                &preferences.light_theme,
+                &preferences.dark_theme,
+                preferences.active_theme_name(),
                 cx,
             );
 

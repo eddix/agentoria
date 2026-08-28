@@ -8,13 +8,6 @@ use crate::indexer::app_data_dir;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum ThemePreference {
-    Light,
-    Dark,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
 pub enum ViewMode {
     Recent,
     Grouped,
@@ -31,7 +24,9 @@ pub struct ScrollAnchor {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {
-    pub theme: ThemePreference,
+    pub theme: String,
+    pub light_theme: String,
+    pub dark_theme: String,
     pub source: String,
     pub view_mode: ViewMode,
     pub hide_subagents: bool,
@@ -41,7 +36,9 @@ pub struct Preferences {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
-            theme: ThemePreference::Light,
+            theme: "Default Light".to_string(),
+            light_theme: "Default Light".to_string(),
+            dark_theme: "Default Dark".to_string(),
             source: "codex".to_string(),
             view_mode: ViewMode::Recent,
             hide_subagents: true,
@@ -99,6 +96,23 @@ impl Preferences {
         .to_string();
     }
 
+    pub fn active_theme_name(&self) -> &str {
+        match self.theme.as_str() {
+            "light" => &self.light_theme,
+            "dark" => &self.dark_theme,
+            _ => &self.theme,
+        }
+    }
+
+    pub fn set_theme(&mut self, name: &str, is_dark: bool) {
+        self.theme = name.to_string();
+        if is_dark {
+            self.dark_theme = name.to_string();
+        } else {
+            self.light_theme = name.to_string();
+        }
+    }
+
     pub fn scroll_anchor(&self, path: &Path) -> Option<ScrollAnchor> {
         self.scroll_anchors
             .get(path.to_string_lossy().as_ref())
@@ -120,7 +134,7 @@ mod tests {
     use anyhow::Result;
     use tempfile::tempdir;
 
-    use super::{Preferences, ScrollAnchor, ThemePreference, ViewMode};
+    use super::{Preferences, ScrollAnchor, ViewMode};
 
     #[test]
     fn preferences_round_trip_native_state() -> Result<()> {
@@ -128,7 +142,9 @@ mod tests {
         let path = directory.path().join("preferences.json");
         let session = directory.path().join("session.jsonl");
         let mut preferences = Preferences {
-            theme: ThemePreference::Dark,
+            theme: "Everforest Dark".to_string(),
+            light_theme: "Flexoki Light".to_string(),
+            dark_theme: "Everforest Dark".to_string(),
             view_mode: ViewMode::Grouped,
             hide_subagents: false,
             ..Preferences::default()
@@ -144,7 +160,9 @@ mod tests {
         preferences.save_to(&path)?;
 
         let loaded = Preferences::load_from(&path);
-        assert_eq!(loaded.theme, ThemePreference::Dark);
+        assert_eq!(loaded.active_theme_name(), "Everforest Dark");
+        assert_eq!(loaded.light_theme, "Flexoki Light");
+        assert_eq!(loaded.dark_theme, "Everforest Dark");
         assert_eq!(loaded.view_mode, ViewMode::Grouped);
         assert!(!loaded.hide_subagents);
         let anchor = loaded.scroll_anchor(&session).expect("anchor should exist");
