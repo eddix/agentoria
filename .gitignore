@@ -10,6 +10,7 @@ yarn-error.log*
 .vite/
 
 # --- Rust / Cargo / Tauri backend ---
+target/
 src-tauri/target/
 src-tauri/gen/schemas/
 

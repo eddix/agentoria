@@ -1080,3 +1080,12 @@ fn read_indexed_paths(root: &Path) -> Result<HashMap<PathBuf, IndexEntry>> {
     }
     Ok(by_path)
 }
+
+pub(crate) fn session_titles() -> Result<HashMap<PathBuf, String>> {
+    Ok(read_indexed_paths(&claude_root()?)?
+        .into_iter()
+        .filter_map(|(path, entry)| {
+            clean_title(entry.summary.as_deref()).map(|title| (path, title))
+        })
+        .collect())
+}

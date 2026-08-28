@@ -9,13 +9,8 @@ edition = "2021"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-anyhow = "1"
-chrono = { version = "0.4", features = ["clock"] }
-dirs = "6"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+sessionary-core = { path = "../crates/sessionary-core" }
 tauri = { version = "2", features = ["devtools"] }
-walkdir = "2"
 
 [features]
 default = []

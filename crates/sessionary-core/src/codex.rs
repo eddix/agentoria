@@ -890,6 +890,23 @@ fn read_index() -> Result<HashMap<String, IndexEntry>> {
     Ok(index)
 }
 
+pub(crate) fn session_titles() -> Result<HashMap<PathBuf, String>> {
+    let index = read_index()?;
+    let sessions_root = codex_root()?.join("sessions");
+    if !sessions_root.exists() {
+        return Ok(HashMap::new());
+    }
+    let paths = build_path_index(&sessions_root);
+    Ok(paths
+        .into_iter()
+        .filter_map(|(id, path)| {
+            let title = index.get(&id)?.title.clone()?;
+            let canonical = path.canonicalize().unwrap_or(path);
+            Some((canonical, title))
+        })
+        .collect())
+}
+
 fn build_path_index(root: &Path) -> HashMap<String, PathBuf> {
     let mut entries = HashMap::new();
     for entry in WalkDir::new(root)

@@ -1,0 +1,19 @@
+[workspace]
+members = [
+    "crates/sessionary-core",
+    "crates/sessionary-gpui",
+    "src-tauri",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[profile.dev]
+debug = 0
+
+[profile.release]
+lto = "thin"
+strip = "symbols"

@@ -73,10 +73,6 @@ pub fn resolve_session_updated_at(
         .unwrap_or_default()
 }
 
-pub fn join_error_to_string(error: impl std::fmt::Display) -> String {
-    format!("background task failed: {error}")
-}
-
 pub fn clean_title(raw: Option<&str>) -> Option<String> {
     raw.and_then(|text| {
         let cleaned = text

@@ -1,0 +1,19 @@
+[package]
+name = "sessionary-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Session discovery and parsing for Sessionary"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["clock"] }
+dirs = "6"
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+walkdir = "2"
+
+[dev-dependencies]
+tempfile = "3"
