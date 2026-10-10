@@ -5,17 +5,17 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleDisplayName</key>
-    <string>Sessionary</string>
+    <string>Agentoria</string>
     <key>CFBundleExecutable</key>
-    <string>sessionary-gpui</string>
+    <string>agentoria</string>
     <key>CFBundleIconFile</key>
     <string>icon.icns</string>
     <key>CFBundleIdentifier</key>
-    <string>com.eddix.sessionary</string>
+    <string>com.eddix.agentoria</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>Sessionary</string>
+    <string>Agentoria</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

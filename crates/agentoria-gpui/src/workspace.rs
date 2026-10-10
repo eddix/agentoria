@@ -4,31 +4,40 @@ use std::{
     time::Duration,
 };
 
+use agentoria_core::{
+    index::{CancellationToken, IndexDatabase, IndexedFile},
+    SessionSource,
+};
 use gpui::{
     div, list, prelude::FluentBuilder as _, px, Anchor, AnyElement, App, AppContext, Context,
-    Entity, InteractiveElement, IntoElement, ListAlignment, ListState, ParentElement, Render,
-    SharedString, StatefulInteractiveElement, Styled, Task, Window,
+    Entity, InteractiveElement, IntoElement, KeyDownEvent, ListAlignment, ListState, ParentElement,
+    Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Task, Window,
 };
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     menu::{DropdownMenu as _, PopupMenuItem},
     progress::Progress,
     resizable::{h_resizable, resizable_panel, ResizableState},
     skeleton::Skeleton,
+    tab::TabBar,
     v_flex, ActiveTheme, Icon, IconName, Root, Sizable as _, StyledExt as _, ThemeMode, TitleBar,
-};
-use sessionary_core::{
-    index::{CancellationToken, IndexDatabase, IndexedFile},
-    SessionSource,
 };
 
 use crate::{
     indexer::{index_path, run_source_load, SourceLoadEvent},
     preferences::{Preferences, ViewMode},
     session_view::SessionView,
+    skill_catalog::SkillAgent,
+    skills_view::SkillsView,
     themes,
 };
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ContentMode {
+    Sessions,
+    Skills,
+}
 
 #[derive(Debug, Clone)]
 enum SessionListItem {
@@ -41,12 +50,15 @@ enum SessionListItem {
 }
 
 pub struct WorkspaceView {
+    mode: ContentMode,
     source: SessionSource,
     sessions: Vec<IndexedFile>,
     session_items: Vec<SessionListItem>,
     session_list_state: ListState,
     selected_file_id: Option<i64>,
     active_session: Option<Entity<SessionView>>,
+    skills_view: Option<Entity<SkillsView>>,
+    skills_subscription: Option<Subscription>,
     source_loading: bool,
     session_loading: bool,
     discovered_files: usize,
@@ -72,6 +84,7 @@ impl WorkspaceView {
         let index_path = index_path().unwrap_or_else(|_| PathBuf::from("index.sqlite"));
         let source = preferences.source();
         let mut view = Self {
+            mode: ContentMode::Sessions,
             source,
             sessions: Vec::new(),
             session_items: Vec::new(),
@@ -79,6 +92,8 @@ impl WorkspaceView {
                 .with_uniform_item_height(px(86.)),
             selected_file_id: None,
             active_session: None,
+            skills_view: None,
+            skills_subscription: None,
             source_loading: false,
             session_loading: false,
             discovered_files: 0,
@@ -326,7 +341,7 @@ impl WorkspaceView {
         self.preferences_task = Some(cx.background_spawn(async move {
             smol::Timer::after(Duration::from_millis(250)).await;
             if let Err(error) = smol::unblock(move || preferences.save()).await {
-                eprintln!("failed to save Sessionary preferences: {error:#}");
+                eprintln!("failed to save Agentoria preferences: {error:#}");
             }
         }));
     }
@@ -347,6 +362,66 @@ impl WorkspaceView {
         self.preferences.set_theme(name, mode.is_dark());
         self.schedule_preferences_save(cx);
         cx.notify();
+    }
+
+    fn set_mode(&mut self, mode: ContentMode, window: &mut Window, cx: &mut Context<Self>) {
+        if self.mode == mode {
+            return;
+        }
+        self.mode = mode;
+        if mode == ContentMode::Skills && self.skills_view.is_none() {
+            let agent = match self.source {
+                SessionSource::Claude => SkillAgent::Claude,
+                SessionSource::Codex => SkillAgent::Codex,
+            };
+            let workspace = self
+                .selected_file_id
+                .and_then(|id| self.sessions.iter().find(|file| file.id == id))
+                .and_then(|file| file.working_dir.as_ref())
+                .map(PathBuf::from)
+                .filter(|path| path.is_dir());
+            let skills = cx.new(|cx| SkillsView::new(agent, workspace, window, cx));
+            self.skills_subscription = Some(cx.observe(&skills, |_, _, cx| cx.notify()));
+            self.skills_view = Some(skills);
+        }
+        cx.notify();
+    }
+
+    fn set_skill_agent(&mut self, agent: SkillAgent, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(skills) = &self.skills_view {
+            skills.update(cx, |view, cx| view.set_agent(agent, window, cx));
+        }
+    }
+
+    fn handle_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.mode != ContentMode::Skills {
+            return;
+        }
+        let Some(skills) = &self.skills_view else {
+            return;
+        };
+        let modifiers = event.keystroke.modifiers;
+        if modifiers.platform
+            && !modifiers.control
+            && !modifiers.alt
+            && !modifiers.shift
+            && event.keystroke.key.eq_ignore_ascii_case("f")
+        {
+            skills.update(cx, |view, cx| view.focus_search(window, cx));
+            window.prevent_default();
+            cx.stop_propagation();
+        } else if !modifiers.modified()
+            && event.keystroke.key.eq_ignore_ascii_case("escape")
+            && skills.update(cx, |view, cx| view.clear_search(window, cx))
+        {
+            window.prevent_default();
+            cx.stop_propagation();
+        }
     }
 
     fn select_session(&mut self, file_id: i64, cx: &mut Context<Self>) {
@@ -423,7 +498,70 @@ impl WorkspaceView {
     fn render_title_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let source = self.source;
         let source_weak = cx.weak_entity();
+        let skills_weak = cx.weak_entity();
         let theme_weak = cx.weak_entity();
+        let skill_agent = self
+            .skills_view
+            .as_ref()
+            .map(|view| view.read(cx).agent())
+            .unwrap_or(match source {
+                SessionSource::Claude => SkillAgent::Claude,
+                SessionSource::Codex => SkillAgent::Codex,
+            });
+        let source_button: AnyElement = if self.mode == ContentMode::Sessions {
+            Button::new("source-menu")
+                .small()
+                .outline()
+                .label(source_label(source))
+                .dropdown_caret(true)
+                .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                    let claude_weak = source_weak.clone();
+                    let codex_weak = source_weak.clone();
+                    menu.label("Session Source")
+                        .item(
+                            PopupMenuItem::new("Claude")
+                                .checked(source == SessionSource::Claude)
+                                .on_click(move |_, _, cx| {
+                                    let _ = claude_weak.update(cx, |view, cx| {
+                                        view.load_source(SessionSource::Claude, cx)
+                                    });
+                                }),
+                        )
+                        .item(
+                            PopupMenuItem::new("Codex")
+                                .checked(source == SessionSource::Codex)
+                                .on_click(move |_, _, cx| {
+                                    let _ = codex_weak.update(cx, |view, cx| {
+                                        view.load_source(SessionSource::Codex, cx)
+                                    });
+                                }),
+                        )
+                })
+                .into_any_element()
+        } else {
+            Button::new("skill-agent-menu")
+                .small()
+                .outline()
+                .label(skill_agent.label())
+                .dropdown_caret(true)
+                .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                    let mut menu = menu.label("Skill Agent");
+                    for agent in SkillAgent::ALL {
+                        let weak = skills_weak.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new(agent.label())
+                                .checked(agent == skill_agent)
+                                .on_click(move |_, window, cx| {
+                                    let _ = weak.update(cx, |view, cx| {
+                                        view.set_skill_agent(agent, window, cx)
+                                    });
+                                }),
+                        );
+                    }
+                    menu
+                })
+                .into_any_element()
+        };
         let active_theme = cx.theme().theme_name().to_string();
         let available_themes = themes::available_themes(cx);
         TitleBar::new().child(
@@ -436,7 +574,7 @@ impl WorkspaceView {
                         .gap_2()
                         .items_center()
                         .child(logo_mark(cx))
-                        .child(div().font_semibold().child("Sessionary"))
+                        .child(div().font_semibold().child("Agentoria"))
                         .when(crate::IS_PREVIEW, |this| {
                             this.child(
                                 div()
@@ -450,35 +588,25 @@ impl WorkspaceView {
                     h_flex()
                         .gap_1()
                         .child(
-                            Button::new("source-menu")
+                            TabBar::new("content-mode")
+                                .segmented()
                                 .small()
-                                .outline()
-                                .label(source_label(source))
-                                .dropdown_caret(true)
-                                .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
-                                    let claude_weak = source_weak.clone();
-                                    let codex_weak = source_weak.clone();
-                                    menu.label("Session Source")
-                                        .item(
-                                            PopupMenuItem::new("Claude")
-                                                .checked(source == SessionSource::Claude)
-                                                .on_click(move |_, _, cx| {
-                                                    let _ = claude_weak.update(cx, |view, cx| {
-                                                        view.load_source(SessionSource::Claude, cx)
-                                                    });
-                                                }),
-                                        )
-                                        .item(
-                                            PopupMenuItem::new("Codex")
-                                                .checked(source == SessionSource::Codex)
-                                                .on_click(move |_, _, cx| {
-                                                    let _ = codex_weak.update(cx, |view, cx| {
-                                                        view.load_source(SessionSource::Codex, cx)
-                                                    });
-                                                }),
-                                        )
-                                }),
+                                .selected_index(match self.mode {
+                                    ContentMode::Sessions => 0,
+                                    ContentMode::Skills => 1,
+                                })
+                                .on_click(cx.listener(|view, index: &usize, window, cx| {
+                                    let mode = match index {
+                                        0 => ContentMode::Sessions,
+                                        1 => ContentMode::Skills,
+                                        _ => return,
+                                    };
+                                    view.set_mode(mode, window, cx);
+                                }))
+                                .child("Sessions")
+                                .child("Skills"),
                         )
+                        .child(source_button)
                         .child(
                             Button::new("theme-menu")
                                 .small()
@@ -670,15 +798,6 @@ impl WorkspaceView {
                 .hover(|this| this.bg(cx.theme().sidebar_primary.opacity(0.14)))
                 .on_click(cx.listener(move |view, _, _, cx| view.toggle_group(&key, cx)))
                 .child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .top_0()
-                        .bottom_0()
-                        .w(px(3.))
-                        .bg(cx.theme().sidebar_primary),
-                )
-                .child(
                     h_flex()
                         .min_w_0()
                         .gap_2()
@@ -788,6 +907,29 @@ impl WorkspaceView {
                 * 100.)
                 .clamp(0., 100.)
         };
+        let (status, source_summary, show_progress) = if self.mode == ContentMode::Skills {
+            if let Some(skills) = &self.skills_view {
+                let skills = skills.read(cx);
+                let (status, count, _) = skills.status();
+                (
+                    status,
+                    format!("{} · {} skills", skills.agent().label(), count),
+                    false,
+                )
+            } else {
+                ("Opening skills".to_string(), "Skills".to_string(), false)
+            }
+        } else {
+            (
+                self.status_text.clone(),
+                format!(
+                    "{} · {} indexed",
+                    source_label(self.source),
+                    self.sessions.len()
+                ),
+                self.source_loading,
+            )
+        };
         h_flex()
             .h(px(28.))
             .flex_shrink_0()
@@ -806,9 +948,9 @@ impl WorkspaceView {
                             .truncate()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child(self.status_text.clone()),
+                            .child(status),
                     )
-                    .when(self.source_loading, |this| {
+                    .when(show_progress, |this| {
                         this.child(
                             Progress::new("index-progress")
                                 .value(overall)
@@ -821,34 +963,40 @@ impl WorkspaceView {
                 div()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child(format!(
-                        "{} · {} indexed",
-                        source_label(self.source),
-                        self.sessions.len()
-                    )),
+                    .child(source_summary),
             )
     }
 }
 
 impl Render for WorkspaceView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let content: AnyElement = if self.mode == ContentMode::Skills {
+            self.skills_view
+                .as_ref()
+                .map(|skills| skills.clone().into_any_element())
+                .unwrap_or_else(|| div().into_any_element())
+        } else {
+            h_resizable("workspace-split")
+                .with_state(&self.resizable_state)
+                .child(
+                    resizable_panel()
+                        .size(px(340.))
+                        .size_range(px(280.)..px(520.))
+                        .child(self.render_sidebar(cx)),
+                )
+                .child(resizable_panel().child(self.render_detail(cx)))
+                .into_any_element()
+        };
         v_flex()
             .size_full()
             .min_h_0()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(self.render_title_bar(cx))
-            .child(
-                h_resizable("workspace-split")
-                    .with_state(&self.resizable_state)
-                    .child(
-                        resizable_panel()
-                            .size(px(340.))
-                            .size_range(px(280.)..px(520.))
-                            .child(self.render_sidebar(cx)),
-                    )
-                    .child(resizable_panel().child(self.render_detail(cx))),
+            .capture_key_down(
+                cx.listener(|view, event, window, cx| view.handle_key_down(event, window, cx)),
             )
+            .child(self.render_title_bar(cx))
+            .child(content)
             .child(self.render_status_bar(cx))
     }
 }

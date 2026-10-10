@@ -5,9 +5,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROFILE="release"
 OPEN_APP=1
-APP_NAME="Sessionary GPUI Preview"
-BIN_NAME="sessionary-gpui-preview"
-BUNDLE_ID="com.eddix.sessionary.gpui-preview"
+APP_NAME="Agentoria GPUI Preview"
+BIN_NAME="agentoria-preview"
+BUNDLE_ID="com.eddix.agentoria.gpui-preview"
 INSTALL_ROOT="${HOME}/Applications"
 
 usage() {
@@ -52,7 +52,7 @@ build_binary() {
   fi
   cargo build \
     --manifest-path "${SCRIPT_DIR}/Cargo.toml" \
-    -p sessionary-gpui \
+    -p agentoria-gpui \
     --bin "$BIN_NAME" \
     --locked \
     "${profile_flag[@]}"
@@ -65,7 +65,7 @@ assemble_bundle() {
     "${STAGING_APP}/Contents/Resources"
   install -m 755 "$BINARY" "${STAGING_APP}/Contents/MacOS/${BIN_NAME}"
   install -m 644 \
-    "${SCRIPT_DIR}/crates/sessionary-gpui/Info.plist" \
+    "${SCRIPT_DIR}/crates/agentoria-gpui/Info.plist" \
     "${STAGING_APP}/Contents/Info.plist"
   install -m 644 \
     "${SCRIPT_DIR}/assets/icon.icns" \

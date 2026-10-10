@@ -1,8 +1,8 @@
 use std::{collections::HashMap, fs, path::Path};
 
+use agentoria_core::SessionSource;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use sessionary_core::SessionSource;
 
 use crate::indexer::app_data_dir;
 
@@ -73,10 +73,7 @@ impl Preferences {
         let temporary = path.with_extension("json.tmp");
         fs::write(&temporary, serde_json::to_vec_pretty(self)?)?;
         fs::rename(&temporary, path).with_context(|| {
-            format!(
-                "failed to replace Sessionary preferences {}",
-                path.display()
-            )
+            format!("failed to replace Agentoria preferences {}", path.display())
         })?;
         Ok(())
     }

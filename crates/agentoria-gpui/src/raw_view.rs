@@ -1,8 +1,8 @@
+use agentoria_core::index::{read_line_chunk, IndexedLine};
 use gpui::{div, px, AppContext, Context, IntoElement, ParentElement, Render, Styled, Window};
-use gpui_component::{
+use gpui_kit::component::{
     button::Button, h_flex, skeleton::Skeleton, v_flex, ActiveTheme, Disableable as _, Sizable as _,
 };
-use sessionary_core::index::{read_line_chunk, IndexedLine};
 
 const PAGE_BYTES: usize = 64 * 1024;
 

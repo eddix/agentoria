@@ -1,9 +1,9 @@
 [package]
-name = "sessionary-core"
+name = "agentoria-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Session discovery and parsing for Sessionary"
+description = "Session discovery and parsing for Agentoria"
 
 [dependencies]
 anyhow = "1"

@@ -1,8 +1,9 @@
 [workspace]
 members = [
-    "crates/sessionary-core",
-    "crates/sessionary-gpui",
+    "crates/agentoria-core",
+    "crates/agentoria-gpui",
 ]
+exclude = ["vendor/gpui-component"]
 resolver = "2"
 
 [workspace.package]

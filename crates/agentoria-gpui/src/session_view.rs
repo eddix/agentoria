@@ -4,17 +4,20 @@ use std::{
     rc::Rc,
 };
 
+use agentoria_core::index::{
+    load_conversation_line, ConversationBody, ConversationKind, IndexedFile, IndexedLine,
+};
 use gpui::{
     div, list, prelude::FluentBuilder as _, px, relative, AnyElement, App, AppContext, Context,
     FollowMode, InteractiveElement, IntoElement, ListAlignment, ListOffset, ListState,
     ParentElement, Render, SharedString, Styled, Window,
 };
-use gpui_component::{
-    button::Button, h_flex, skeleton::Skeleton, text::TextView, v_flex, ActiveTheme, IconName,
-    Sizable as _, StyledExt as _, WindowExt as _,
-};
-use sessionary_core::index::{
-    load_conversation_line, ConversationBody, ConversationKind, IndexedFile, IndexedLine,
+use gpui_kit::component::{
+    button::Button,
+    h_flex,
+    skeleton::Skeleton,
+    text::{TextView, TextViewStyle},
+    v_flex, ActiveTheme, IconName, Sizable as _, StyledExt as _, WindowExt as _,
 };
 
 use crate::preferences::ScrollAnchor;
@@ -299,8 +302,8 @@ impl SessionView {
             .conversation_kind
             .unwrap_or(ConversationKind::Assistant);
         let accent = match kind {
-            ConversationKind::User => cx.theme().primary,
-            ConversationKind::Assistant => cx.theme().border,
+            ConversationKind::User => cx.theme().blue,
+            ConversationKind::Assistant => cx.theme().green,
         };
         let role = match kind {
             ConversationKind::User => "USER",
@@ -312,6 +315,11 @@ impl SessionView {
                 SharedString::from(format!("message-{}-{}", self.file.id, line.ordinal)),
                 message.text.clone(),
             )
+            .style(TextViewStyle::default().inline_code(gpui::HighlightStyle {
+                color: Some(cx.theme().foreground),
+                background_color: Some(cx.theme().muted),
+                ..Default::default()
+            }))
             .selectable(true)
             .w_full()
             .into_any_element(),
@@ -353,23 +361,33 @@ impl SessionView {
                 "message-row-{}-{}",
                 self.file.id, line.ordinal
             )))
+            .relative()
             .w_full()
             .gap_2()
             .px_5()
             .py_4()
             .border_b_1()
-            .border_l_2()
             .border_color(cx.theme().border)
-            .when(kind == ConversationKind::User, |this| {
-                this.bg(accent.opacity(0.025))
-            })
+            .child(
+                div()
+                    .absolute()
+                    .left(px(12.))
+                    .top_4()
+                    .bottom_4()
+                    .w(px(2.))
+                    .bg(accent),
+            )
             .child(
                 h_flex()
+                    .debug_selector(|| "session-message-header".to_string())
                     .justify_between()
                     .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(role)
-                    .child(line.timestamp.clone().unwrap_or_default()),
+                    .child(div().font_semibold().text_color(accent).child(role))
+                    .child(
+                        div()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(line.timestamp.clone().unwrap_or_default()),
+                    ),
             )
             .child(content)
             .into_any_element()
@@ -388,7 +406,6 @@ impl SessionView {
             .px_5()
             .py_3()
             .border_b_1()
-            .border_l_2()
             .border_color(cx.theme().border)
             .bg(cx.theme().muted.opacity(0.2))
             .child(
@@ -517,22 +534,22 @@ mod tests {
         time::Instant,
     };
 
-    use gpui::{
-        point, px, AppContext as _, FollowMode, ListAlignment, ListState, ScrollDelta,
-        ScrollWheelEvent, TestAppContext, VisualTestContext,
-    };
-    use sessionary_core::{
+    use agentoria_core::{
         index::{
             ConversationBody, ConversationKind, ConversationMessage, IndexedFile, IndexedLine,
         },
         SessionSource,
+    };
+    use gpui::{
+        point, px, AppContext as _, FollowMode, ListAlignment, ListState, Modifiers, MouseButton,
+        ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext,
     };
 
     use super::SessionView;
 
     #[gpui::test]
     fn session_view_starts_at_tail_and_toggles_markdown(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
         let file = test_file(0);
         let view = cx.update(|cx| {
             cx.new(|cx| SessionView::new(file, Vec::new(), Vec::new(), None, |_, _, _| {}, cx))
@@ -547,11 +564,82 @@ mod tests {
     }
 
     #[gpui::test]
+    fn transcript_text_can_be_selected_by_dragging(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let text = "Alpha bravo charlie delta";
+        let file = test_file(1);
+        let line = IndexedLine {
+            file_id: file.id,
+            source: SessionSource::Codex,
+            path: PathBuf::from("/tmp/selection.jsonl"),
+            ordinal: 0,
+            line_number: 1,
+            byte_offset: 0,
+            byte_len: text.len() as u64,
+            event_type: "event_msg.agent_message".to_string(),
+            timestamp: Some("2026-08-28T01:00:00.000Z".to_string()),
+            conversation_kind: Some(ConversationKind::Assistant),
+            process_count: 0,
+        };
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|_| {
+                let list_state = ListState::new(1, ListAlignment::Bottom, px(1200.))
+                    .with_uniform_item_height(px(180.));
+                list_state.set_follow_mode(FollowMode::Tail);
+                SessionView {
+                    file,
+                    conversation_lines: vec![line],
+                    process_lines: Vec::new(),
+                    list_state,
+                    bodies: HashMap::from([(
+                        0,
+                        ConversationBody::Loaded(ConversationMessage {
+                            kind: ConversationKind::Assistant,
+                            text: text.to_string(),
+                            model: Some("test".to_string()),
+                            stop_reason: None,
+                            source_bytes: text.len() as u64,
+                        }),
+                    )]),
+                    loading: HashSet::new(),
+                    cache_order: VecDeque::new(),
+                    cached_source_bytes: text.len(),
+                    visible_range: 0..1,
+                    render_markdown: true,
+                    show_jump_to_bottom: false,
+                    on_scroll: Rc::new(|_, _, _| {}),
+                }
+            });
+            gpui_kit::component::Root::new(view, window, cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+        draw(cx);
+
+        let header = cx
+            .debug_bounds("session-message-header")
+            .expect("message header should be rendered");
+        let from = point(header.left() + px(4.), header.bottom() + px(10.));
+        let to = point(from.x + px(140.), from.y);
+        cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+        draw(cx);
+        cx.simulate_mouse_move(to, Some(MouseButton::Left), Modifiers::default());
+        draw(cx);
+        cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::default());
+        draw(cx);
+
+        let selected = cx.update(gpui_kit::base::TextSelection::selected_text);
+        assert!(
+            !selected.trim().is_empty(),
+            "dragging across transcript text should select content"
+        );
+    }
+
+    #[gpui::test]
     fn transcript_scroll_p95_stays_within_one_frame(cx: &mut TestAppContext) {
         const ROWS: usize = 1_000;
         const SAMPLES: usize = 40;
 
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
         let file = test_file(ROWS);
         let lines = (0..ROWS)
             .map(|index| IndexedLine {
@@ -603,7 +691,7 @@ mod tests {
                 }
                 view
             });
-            gpui_component::Root::new(view, window, cx)
+            gpui_kit::component::Root::new(view, window, cx)
         });
         let cx: &mut VisualTestContext = cx;
         draw(cx);

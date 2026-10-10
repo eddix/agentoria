@@ -11,6 +11,7 @@ yarn-error.log*
 
 # --- Rust / Cargo ---
 target/
+vendor/gpui-component/
 
 # --- Runtime / app output ---
 log/

@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 
+use agentoria_core::{
+    index::{load_process_line, IndexedLine, ProcessBody},
+    SessionEvent,
+};
 use gpui::{
     div, px, AnyElement, AppContext, Context, IntoElement, ParentElement, Render, Styled, Window,
 };
-use gpui_component::{
+use gpui_kit::component::{
     button::Button, h_flex, skeleton::Skeleton, v_flex, ActiveTheme, Disableable as _,
     Sizable as _, StyledExt as _, WindowExt as _,
-};
-use sessionary_core::{
-    index::{load_process_line, IndexedLine, ProcessBody},
-    SessionEvent,
 };
 
 use crate::raw_view::RawRecordView;

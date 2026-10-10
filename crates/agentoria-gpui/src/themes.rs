@@ -1,6 +1,6 @@
 use anyhow::{Context as _, Result};
 use gpui::{App, Window};
-use gpui_component::{Theme, ThemeMode, ThemeRegistry};
+use gpui_kit::component::{Theme, ThemeMode, ThemeRegistry};
 
 const BUILTIN_THEMES: &[(&str, &str)] = &[
     (
@@ -108,20 +108,20 @@ pub fn available_themes(cx: &App) -> Vec<(String, ThemeMode)> {
         .collect()
 }
 
-fn theme_config(name: &str, cx: &App) -> Option<std::rc::Rc<gpui_component::ThemeConfig>> {
+fn theme_config(name: &str, cx: &App) -> Option<std::rc::Rc<gpui_kit::component::ThemeConfig>> {
     ThemeRegistry::global(cx).themes().get(name).cloned()
 }
 
 #[cfg(test)]
 mod tests {
     use gpui::TestAppContext;
-    use gpui_component::Theme;
+    use gpui_kit::component::Theme;
 
     use super::{apply_theme, available_themes, register_builtin_themes};
 
     #[gpui::test]
     fn builtin_theme_registry_switches_named_theme(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
         cx.update(|cx| register_builtin_themes(cx).expect("builtin themes should load"));
         cx.update(|cx| {
             assert!(available_themes(cx).len() > 20);

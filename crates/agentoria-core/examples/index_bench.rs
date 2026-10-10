@@ -1,17 +1,17 @@
 use std::{env, path::PathBuf, time::Instant};
 
-use anyhow::{bail, Context, Result};
-use sessionary_core::{
+use agentoria_core::{
     index::{load_conversation_line, CancellationToken, IndexDatabase},
     SessionSource,
 };
+use anyhow::{bail, Context, Result};
 
 fn main() -> Result<()> {
     let mut arguments = env::args().skip(1);
     let source = arguments
         .next()
         .context("usage: index_bench <claude|codex> <session.jsonl>")?;
-    let source = sessionary_core::parse_source(&source)?;
+    let source = agentoria_core::parse_source(&source)?;
     let session = PathBuf::from(
         arguments
             .next()

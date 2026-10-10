@@ -21,7 +21,7 @@ pub(super) fn open_database(path: &Path) -> Result<Connection> {
             archive_database(path)?;
             try_open(path).with_context(|| {
                 format!(
-                    "failed to recreate Sessionary index after archiving {}",
+                    "failed to recreate Agentoria index after archiving {}",
                     path.display()
                 )
             })
@@ -39,7 +39,7 @@ pub(super) fn open_memory_database() -> Result<Connection> {
 
 fn try_open(path: &Path) -> Result<Connection> {
     let connection = Connection::open(path)
-        .with_context(|| format!("failed to open Sessionary index {}", path.display()))?;
+        .with_context(|| format!("failed to open Agentoria index {}", path.display()))?;
     configure(&connection)?;
     initialize(&connection)?;
     Ok(connection)
@@ -64,20 +64,20 @@ fn configure(connection: &Connection) -> Result<()> {
 fn initialize(connection: &Connection) -> Result<()> {
     let integrity: String = connection
         .query_row("PRAGMA quick_check", [], |row| row.get(0))
-        .context("failed to validate Sessionary index")?;
+        .context("failed to validate Agentoria index")?;
     if integrity != "ok" {
-        bail!("Sessionary index failed quick_check: {integrity}");
+        bail!("Agentoria index failed quick_check: {integrity}");
     }
 
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
-        .context("failed to read Sessionary index schema version")?;
+        .context("failed to read Agentoria index schema version")?;
     match version {
         0 => create_schema(connection),
         SCHEMA_VERSION => Ok(()),
-        _ => bail!(
-            "unsupported Sessionary index schema version {version}; expected {SCHEMA_VERSION}"
-        ),
+        _ => {
+            bail!("unsupported Agentoria index schema version {version}; expected {SCHEMA_VERSION}")
+        }
     }
 }
 
@@ -158,7 +158,7 @@ fn create_schema(connection: &Connection) -> Result<()> {
             COMMIT;
             "#,
         )
-        .context("failed to initialize Sessionary index schema")?;
+        .context("failed to initialize Agentoria index schema")?;
     Ok(())
 }
 
@@ -182,7 +182,7 @@ fn archive_database(path: &Path) -> Result<PathBuf> {
     let archive = path.with_extension(format!("corrupt-{stamp}.sqlite"));
     fs::rename(path, &archive).with_context(|| {
         format!(
-            "failed to archive corrupt Sessionary index {}",
+            "failed to archive corrupt Agentoria index {}",
             path.display()
         )
     })?;

@@ -1,13 +1,13 @@
-# Sessionary Development Guide
+# Agentoria Development Guide
 
 ## Overview
 
-Sessionary is a native macOS GPUI application for browsing local Claude Code and Codex JSONL sessions. It is read-only with respect to `~/.claude` and `~/.codex`.
+Agentoria is a native macOS GPUI application for browsing local Claude Code and Codex JSONL sessions and Agent Skills. It is read-only with respect to the agent source directories.
 
 The application is a Cargo workspace:
 
-- `crates/sessionary-core`: source discovery, Claude/Codex parsing, SQLite byte-offset index, lazy record loading, and benchmarks.
-- `crates/sessionary-gpui`: GPUI application state, virtualized session/transcript views, Markdown, process/raw drawers, preferences, file watching, and packaging entry points.
+- `crates/agentoria-core`: source discovery, Claude/Codex parsing, SQLite byte-offset index, lazy record loading, and benchmarks.
+- `crates/agentoria-gpui`: GPUI application state, virtualized session/transcript and skill views, Markdown, process/raw drawers, preferences, file watching, and packaging entry points.
 
 The final Tauri implementation is preserved by the `tauri-final` git tag. Do not reintroduce WebView, React, or Tauri dependencies on main.
 
@@ -36,15 +36,14 @@ Build the isolated Preview channel:
 Run the large-file index benchmark without printing session content:
 
 ```bash
-cargo run -p sessionary-core --example index_bench --release --locked -- \
+cargo run -p agentoria-core --example index_bench --release --locked -- \
   codex /absolute/path/to/session.jsonl
 ```
 
 ## Dependency Rules
 
-- `gpui-component` is pinned to an exact git revision in `crates/sessionary-gpui/Cargo.toml`.
-- GPUI uses the same Zed git source as `gpui-component`; `Cargo.lock` pins the single resolved graph to `f66ed399cdde86092af8af3dc7b418abf45f37f8`.
-- Do not add an absolute local path dependency or a second GPUI source. Two GPUI source IDs produce incompatible `App`, `Window`, and element types.
+- `crates/agentoria-gpui/Cargo.toml` uses `gpui-kit = "0.7.1"`; `Cargo.lock` pins the resolved release. Kit re-exports the matching GPUI, base, component, platform, and assets crates.
+- Import GPUI types through `gpui-kit` rather than adding a second GPUI source. Distinct GPUI package IDs produce incompatible `App`, `Window`, and element types.
 - Keep `Cargo.lock` committed and use `--locked` in verification and packaging commands.
 
 ## Index Invariants
@@ -60,13 +59,17 @@ The SQLite index is a rebuildable cache. It stores file identity, timestamps, by
 
 The Preview and formal channels use isolated directories:
 
-- Preview: `~/Library/Application Support/Sessionary GPUI Preview`
-- Formal: `~/Library/Application Support/Sessionary`
+- Preview: `~/Library/Application Support/Agentoria GPUI Preview`
+- Formal: `~/Library/Application Support/Agentoria`
+
+On first launch, Agentoria copies preferences and uses SQLite's online backup API to migrate the index from the corresponding Sessionary directory, without deleting the old data.
 
 ## UI Architecture
 
 - `WorkspaceView` owns source selection, progressive indexing, grouping/filtering, preferences, the resizable split, and selected-session lifecycle.
 - `SessionView` owns transcript virtualization, visible-range body loading, bounded LRU state, tail following, scroll anchors, and Markdown/Raw mode.
+- `SkillsView` scans a fixed set of Claude Code, Codex, Kimi, ZCode, and Trae user/project skill roots on a background thread. The list reads bounded metadata; selecting a skill scans its bounded directory tree and loads local Markdown, source, or image files on demand. A collapsible, independently resizable right pane virtualizes the file tree. Text files are capped at 2 MiB and images at 20 MiB. Symlinks and Markdown links cannot navigate outside the selected skill. It does not scan plugin caches or remote/cloud skills.
+- Skill filtering runs only over scanned names and full descriptions for the selected Agent. Name prefix/substring/subsequence matches outrank description matches; the query is cleared on Agent changes and retained when switching between Sessions and Skills.
 - Process and oversized raw records use paged drawers. Never materialize an entire large session or oversized line in the UI.
 - Use `gpui::list` for variable-height transcripts. Do not replace it with `gpui_component::VirtualList`, which requires caller-supplied exact item sizes.
 - GPUI entities and background tasks use revision/cancellation checks. Results from an older source or session must never overwrite current UI state.
@@ -87,4 +90,4 @@ Formal promotion requires release evidence:
 
 `build_gpui_formal.sh` and `build_gpui_preview.sh` construct standard `.app` bundles, copy `assets/icon.icns`, ad-hoc sign, verify, install into `~/Applications`, and remove staging bundles so Spotlight does not see build duplicates.
 
-The formal app uses bundle ID `com.eddix.sessionary`. The Preview uses `com.eddix.sessionary.gpui-preview`.
+The formal app uses bundle ID `com.eddix.agentoria`. The Preview uses `com.eddix.agentoria.gpui-preview`.

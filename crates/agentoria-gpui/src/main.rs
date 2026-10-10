@@ -3,12 +3,15 @@ mod preferences;
 mod process_view;
 mod raw_view;
 mod session_view;
+mod skill_catalog;
+mod skills_view;
 mod themes;
 mod workspace;
 
+extern crate gpui_kit as gpui;
+
 use gpui::{px, size, App, AppContext, Bounds, TaskExt, WindowBounds, WindowOptions};
-use gpui_component::TitleBar;
-use gpui_component_assets::Assets;
+use gpui_kit::{assets::Assets, component::TitleBar};
 use preferences::Preferences;
 use workspace::WorkspaceView;
 
@@ -16,9 +19,9 @@ use workspace::WorkspaceView;
 compile_error!("either preview or formal feature must be enabled");
 
 #[cfg(feature = "formal")]
-pub(crate) const APP_ID: &str = "com.eddix.sessionary";
+pub(crate) const APP_ID: &str = "com.eddix.agentoria";
 #[cfg(not(feature = "formal"))]
-pub(crate) const APP_ID: &str = "com.eddix.sessionary.gpui-preview";
+pub(crate) const APP_ID: &str = "com.eddix.agentoria.gpui-preview";
 
 #[cfg(feature = "formal")]
 pub(crate) const IS_PREVIEW: bool = false;
@@ -26,13 +29,16 @@ pub(crate) const IS_PREVIEW: bool = false;
 pub(crate) const IS_PREVIEW: bool = true;
 
 fn main() {
+    if let Err(error) = indexer::migrate_legacy_data() {
+        eprintln!("failed to migrate Agentoria data: {error:#}");
+    }
     let preferences = Preferences::load();
-    gpui_platform::application()
+    gpui_kit::application()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
-            gpui_component::init(cx);
+            gpui_kit::init(cx);
             if let Err(error) = themes::register_builtin_themes(cx) {
-                eprintln!("failed to register Sessionary themes: {error:#}");
+                eprintln!("failed to register Agentoria themes: {error:#}");
             }
             themes::apply_saved_themes(
                 &preferences.light_theme,

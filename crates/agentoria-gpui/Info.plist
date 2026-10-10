@@ -5,17 +5,17 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleDisplayName</key>
-    <string>Sessionary GPUI Preview</string>
+    <string>Agentoria GPUI Preview</string>
     <key>CFBundleExecutable</key>
-    <string>sessionary-gpui-preview</string>
+    <string>agentoria-preview</string>
     <key>CFBundleIconFile</key>
     <string>icon.icns</string>
     <key>CFBundleIdentifier</key>
-    <string>com.eddix.sessionary.gpui-preview</string>
+    <string>com.eddix.agentoria.gpui-preview</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>Sessionary GPUI Preview</string>
+    <string>Agentoria GPUI Preview</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
