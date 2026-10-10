@@ -9,6 +9,10 @@ Agentoria is a read-only macOS app for browsing local coding-agent sessions and 
 
 Agentoria never modifies agent session or Skill files. It does not upload their content.
 
+## Download
+
+Download the ZIP for your Mac's architecture from [GitHub Releases](https://github.com/eddix/agentoria/releases). Unzip it and move `Agentoria.app` to Applications. The app is ad-hoc signed, not Apple notarized, so macOS may block the downloaded app.
+
 ## Build on macOS
 
 Requires macOS 15 or later, Xcode Command Line Tools (`xcode-select --install`), and Rust 1.92 or later. The project is tested with Rust 1.95.0. Then run:
@@ -24,7 +28,5 @@ Run the tests with `cargo test --workspace --locked`.
 ## Local data
 
 The index and preferences live in `~/Library/Application Support/Agentoria/`. The index stores offsets and metadata, not full transcript bodies; it can be rebuilt from your local sessions. On first launch, Agentoria copies preferences and migrates the index from an existing Sessionary installation without deleting the old data.
-
-Only the source code is published here. There is no downloadable binary release yet.
 
 Original code and artwork are licensed under MIT. See [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md).
