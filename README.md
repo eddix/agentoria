@@ -11,13 +11,13 @@ Agentoria never modifies agent session or Skill files. It does not upload their 
 
 ## Build on macOS
 
-Install Rust, then run:
+Requires macOS 15 or later, Xcode Command Line Tools (`xcode-select --install`), and Rust 1.92 or later. The project is tested with Rust 1.95.0. Then run:
 
 ```bash
 ./build_and_open.sh
 ```
 
-This builds the release binary, ad-hoc signs it, installs `~/Applications/Agentoria.app`, and opens it. The project is tested with Rust 1.95.0. To build without opening the app, use `./build_and_open.sh --no-open`.
+This builds the release binary, ad-hoc signs it, installs `~/Applications/Agentoria.app`, and opens it. To build without opening the app, use `./build_and_open.sh --no-open`.
 
 Run the tests with `cargo test --workspace --locked`.
 
