@@ -1,5 +1,6 @@
 mod classify;
 mod schema;
+pub mod search;
 
 use std::{
     fs::{self, File, Metadata},

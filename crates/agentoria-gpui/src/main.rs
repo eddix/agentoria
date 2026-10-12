@@ -2,6 +2,7 @@ mod indexer;
 mod preferences;
 mod process_view;
 mod raw_view;
+mod session_search;
 mod session_view;
 mod skill_catalog;
 mod skills_view;

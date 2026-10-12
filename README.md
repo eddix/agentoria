@@ -3,6 +3,7 @@
 Agentoria is a read-only macOS app for browsing local coding-agent sessions and skills.
 
 - Browse Claude Code and Codex conversations by recency or workspace. Long transcripts are indexed incrementally and rendered lazily.
+- Find USER/ASSISTANT message text with `⌘F` or the transcript's **Find** button. Matching ignores case and searches the Markdown source. Use `Enter` / `Shift+Enter` or `⌘G` / `⌘⇧G` to cycle through matches, and `Esc` to close. The search bar reports skipped large or unreadable records and any result limit.
 - Browse local Skills for Claude Code, Codex, Kimi, ZCode, and Trae. Open Markdown, images, and source files from a collapsible file tree; scripts use a highlighted, read-only code editor.
 - Follow links between files inside a Skill. Paths and symlinks cannot navigate outside its directory.
 - Switch between the built-in light and dark themes. Preferences and the rebuildable SQLite index stay on your Mac.

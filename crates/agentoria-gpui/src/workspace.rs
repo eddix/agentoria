@@ -399,6 +399,17 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.mode == ContentMode::Sessions {
+            if self.active_session.as_ref().is_some_and(|session| {
+                session.update(cx, |view, cx| {
+                    view.handle_search_key_down(event, window, cx)
+                })
+            }) {
+                window.prevent_default();
+                cx.stop_propagation();
+            }
+            return;
+        }
         if self.mode != ContentMode::Skills {
             return;
         }

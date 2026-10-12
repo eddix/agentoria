@@ -67,13 +67,15 @@ On first launch, Agentoria copies preferences and uses SQLite's online backup AP
 ## UI Architecture
 
 - `WorkspaceView` owns source selection, progressive indexing, grouping/filtering, preferences, the resizable split, and selected-session lifecycle.
-- `SessionView` owns transcript virtualization, visible-range body loading, bounded LRU state, tail following, scroll anchors, and Markdown/Raw mode.
+- `SessionView` owns transcript virtualization, layout-driven body loading, bounded LRU state, tail following, scroll anchors, and Markdown/Raw mode. Only one body-load batch (up to 16 records) runs at a time on GPUI's background executor; the next batch follows the latest rendered range and obsolete results are discarded. The cache holds up to 128 entries / 64 MiB of actual text, with currently rendered rows protected from eviction; oversized records count as metadata, not resident source bytes. Read failures stay visible until an explicit retry or cache eviction.
+- Transcript text uses `SharedString`; process metadata is shared as `Arc<[IndexedLine]>` between the summary and drawer. Do not deep-clone either on every frame.
+- In-session Find scans indexed USER/ASSISTANT text on the background executor after a 200 ms debounce. Query revisions and a cancellation token prevent stale results; session drop cancels scanning. Only UTF-8 source ranges are retained (first 10,000 matches, with the complete total count). Records above the 512 KiB inline source limit and unreadable records are counted explicitly in the search bar. The active Markdown match owns a single parsed text entity, maps its source range to rendered text, and uses theme-aware highlights; Raw mode highlights source text. Process payloads are outside this search scope.
 - `SkillsView` scans a fixed set of Claude Code, Codex, Kimi, ZCode, and Trae user/project skill roots on a background thread. The list reads bounded metadata; selecting a skill scans its bounded directory tree and loads local Markdown, source, or image files on demand. A collapsible, independently resizable right pane virtualizes the file tree. Text files are capped at 2 MiB and images at 20 MiB. Symlinks and Markdown links cannot navigate outside the selected skill. It does not scan plugin caches or remote/cloud skills.
 - Skill filtering runs only over scanned names and full descriptions for the selected Agent. Name prefix/substring/subsequence matches outrank description matches; the query is cleared on Agent changes and retained when switching between Sessions and Skills.
 - Process and oversized raw records use paged drawers. Never materialize an entire large session or oversized line in the UI.
 - Use `gpui::list` for variable-height transcripts. Do not replace it with `gpui_component::VirtualList`, which requires caller-supplied exact item sizes.
 - GPUI entities and background tasks use revision/cancellation checks. Results from an older source or session must never overwrite current UI state.
-- Do not read `ListState` from inside its scroll callback; GPUI invokes that callback while holding an internal mutable borrow. Use `ListScrollEvent.visible_range` instead.
+- Do not read `ListState` from inside its scroll callback; GPUI invokes that callback while holding an internal mutable borrow. Defer exact anchor reads with `window.defer`. Load rows observed during layout after the frame, since restoration, resizing, and async row-height changes need not emit scroll events.
 
 ## Performance Gates
 
@@ -85,6 +87,8 @@ Formal promotion requires release evidence:
 - Largest-session RSS at most 400 MiB.
 
 `session_view::tests::transcript_scroll_p95_stays_within_one_frame` enforces the release scroll gate. Run it with `--release -- --nocapture`; debug timing is informational only.
+
+`session_view::tests::large_transcript_keeps_cache_bounded_across_viewports` uses a temporary JSONL fixture with 10,000 conversation records and 100,000 process metadata rows. It enforces the indexed first-screen gate in release mode and checks cache bounds across 73 viewport jumps. This synthetic fixture does not replace real-session RSS and end-to-end indexing measurements.
 
 ## Packaging
 

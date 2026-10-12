@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use agentoria_core::{
     index::{load_process_line, IndexedLine, ProcessBody},
@@ -18,14 +18,14 @@ const PAGE_SIZE: usize = 50;
 const MAX_INLINE_PROCESS_BYTES: u64 = 512 * 1024;
 
 pub struct ProcessDetailsView {
-    lines: Vec<IndexedLine>,
+    lines: Arc<[IndexedLine]>,
     page: usize,
     bodies: HashMap<usize, ProcessBody>,
     loading: bool,
 }
 
 impl ProcessDetailsView {
-    pub fn new(lines: Vec<IndexedLine>, cx: &mut Context<Self>) -> Self {
+    pub fn new(lines: Arc<[IndexedLine]>, cx: &mut Context<Self>) -> Self {
         let mut view = Self {
             lines,
             page: 0,
