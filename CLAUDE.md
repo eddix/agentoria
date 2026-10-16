@@ -66,6 +66,7 @@ On first launch, Agentoria copies preferences and uses SQLite's online backup AP
 
 ## UI Architecture
 
+- The application entry point registers the global Quit action, `⌘Q`, the native application menu, and `QuitMode::LastWindowClosed`. Formal and Preview share this lifecycle behavior; quitting must work regardless of which input or view has focus.
 - `WorkspaceView` owns source selection, progressive indexing, grouping/filtering, preferences, the resizable split, and selected-session lifecycle.
 - `SessionView` owns transcript virtualization, layout-driven body loading, bounded LRU state, tail following, scroll anchors, and Markdown/Raw mode. Only one body-load batch (up to 16 records) runs at a time on GPUI's background executor; the next batch follows the latest rendered range and obsolete results are discarded. The cache holds up to 128 entries / 64 MiB of actual text, with currently rendered rows protected from eviction; oversized records count as metadata, not resident source bytes. Read failures stay visible until an explicit retry or cache eviction.
 - Transcript text uses `SharedString`; process metadata is shared as `Arc<[IndexedLine]>` between the summary and drawer. Do not deep-clone either on every frame.

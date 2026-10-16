@@ -11,10 +11,15 @@ mod workspace;
 
 extern crate gpui_kit as gpui;
 
-use gpui::{px, size, App, AppContext, Bounds, TaskExt, WindowBounds, WindowOptions};
+use gpui::{
+    px, size, App, AppContext, Bounds, KeyBinding, Menu, MenuItem, QuitMode, TaskExt, WindowBounds,
+    WindowOptions,
+};
 use gpui_kit::{assets::Assets, component::TitleBar};
 use preferences::Preferences;
 use workspace::WorkspaceView;
+
+gpui::actions!(agentoria, [Quit]);
 
 #[cfg(not(any(feature = "preview", feature = "formal")))]
 compile_error!("either preview or formal feature must be enabled");
@@ -36,8 +41,19 @@ fn main() {
     let preferences = Preferences::load();
     gpui_kit::application()
         .with_assets(Assets)
+        .with_quit_mode(QuitMode::LastWindowClosed)
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
+            cx.on_action(|_: &Quit, cx| cx.quit());
+            cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
+            let app_name = if IS_PREVIEW {
+                "Agentoria Preview"
+            } else {
+                "Agentoria"
+            };
+            cx.set_menus([
+                Menu::new(app_name).items([MenuItem::action(format!("Quit {app_name}"), Quit)])
+            ]);
             if let Err(error) = themes::register_builtin_themes(cx) {
                 eprintln!("failed to register Agentoria themes: {error:#}");
             }
