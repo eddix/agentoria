@@ -853,6 +853,8 @@ impl SessionView {
     ) -> impl IntoElement {
         let lines = self.process_lines.clone();
         h_flex()
+            .w_full()
+            .min_w_0()
             .min_h(px(72.))
             .justify_between()
             .gap_4()
@@ -863,6 +865,7 @@ impl SessionView {
             .bg(cx.theme().muted.opacity(0.2))
             .child(
                 v_flex()
+                    .flex_1()
                     .min_w_0()
                     .gap_1()
                     .child(format!(
@@ -879,6 +882,7 @@ impl SessionView {
             )
             .child(
                 Button::new("open-process-details")
+                    .flex_shrink_0()
                     .small()
                     .outline()
                     .icon(IconName::PanelRightOpen)
