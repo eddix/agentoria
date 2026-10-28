@@ -13,7 +13,7 @@ use agentoria_core::{
 };
 use anyhow::{Context, Result};
 use async_channel::Sender;
-use notify::{Event, EventKind, RecursiveMode, Watcher as _};
+use notify::{event::ModifyKind, Event, EventKind, RecursiveMode, Watcher as _};
 use rusqlite::{Connection, DatabaseName, OpenFlags};
 
 #[derive(Debug)]
@@ -29,6 +29,7 @@ pub enum SourceLoadEvent {
         scan: ScanProgress,
     },
     Indexed(Box<IndexedFile>),
+    Removed(Vec<i64>),
     FileError {
         path: PathBuf,
         message: String,
@@ -118,6 +119,7 @@ pub fn run_source_load(
     sender: &Sender<SourceLoadEvent>,
 ) -> Result<()> {
     let mut database = IndexDatabase::open(index_path)?;
+    reconcile_missing_sessions(source, &mut database, cancellation, sender)?;
     sender
         .send_blocking(SourceLoadEvent::Cached(database.list_files(source)?))
         .ok();
@@ -169,6 +171,7 @@ pub fn run_source_load(
         }
     }
 
+    reconcile_missing_sessions(source, &mut database, cancellation, sender)?;
     sender.send_blocking(SourceLoadEvent::Finished).ok();
     watch_source(source, &mut database, &titles, cancellation, sender)
 }
@@ -200,10 +203,14 @@ fn watch_source(
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
         let mut changed = HashSet::new();
-        collect_changed_paths(source, &root, first, &mut changed);
+        let mut reconcile = collect_changed_paths(source, &root, first, &mut changed);
         std::thread::sleep(Duration::from_millis(150));
         while let Ok(event) = watch_receiver.try_recv() {
-            collect_changed_paths(source, &root, event, &mut changed);
+            reconcile |= collect_changed_paths(source, &root, event, &mut changed);
+        }
+
+        if reconcile {
+            reconcile_missing_sessions(source, database, cancellation, sender)?;
         }
 
         let total_files = database.list_files(source)?.len().max(1);
@@ -253,20 +260,38 @@ fn watch_source(
     Ok(())
 }
 
+fn reconcile_missing_sessions(
+    source: SessionSource,
+    database: &mut IndexDatabase,
+    cancellation: &CancellationToken,
+    sender: &Sender<SourceLoadEvent>,
+) -> Result<()> {
+    let removed = database.prune_missing_files(source, cancellation)?;
+    if !removed.is_empty() {
+        sender.send_blocking(SourceLoadEvent::Removed(removed)).ok();
+    }
+    Ok(())
+}
+
 fn collect_changed_paths(
     source: SessionSource,
     root: &Path,
     event: notify::Result<Event>,
     paths: &mut HashSet<PathBuf>,
-) {
+) -> bool {
     let Ok(event) = event else {
-        return;
+        return true;
     };
+    let reconcile = event.need_rescan()
+        || matches!(
+            event.kind,
+            EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_))
+        );
     if !matches!(
         event.kind,
         EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
     ) {
-        return;
+        return reconcile;
     }
     paths.extend(
         event
@@ -274,6 +299,7 @@ fn collect_changed_paths(
             .into_iter()
             .filter_map(|path| session_file_for_event(source, root, &path)),
     );
+    reconcile
 }
 
 #[cfg(test)]
@@ -284,7 +310,54 @@ mod tests {
     use rusqlite::Connection;
     use tempfile::tempdir;
 
-    use super::migrate_legacy_data_at;
+    use super::{
+        collect_changed_paths, migrate_legacy_data_at, reconcile_missing_sessions, SourceLoadEvent,
+    };
+
+    #[test]
+    fn directory_removal_reconciles_index_and_emits_removed_ids() -> Result<()> {
+        let root = tempdir()?;
+        let group = root.path().join("project");
+        fs::create_dir(&group)?;
+        let path = group.join("session.jsonl");
+        fs::write(
+            &path,
+            "{\"type\":\"user\",\"message\":{\"content\":\"Question\"}}\n",
+        )?;
+        let mut index = agentoria_core::index::IndexDatabase::open_in_memory()?;
+        let token = agentoria_core::index::CancellationToken::default();
+        let id = index
+            .scan_file(agentoria_core::SessionSource::Claude, path, &token, |_| {})?
+            .file
+            .id;
+        fs::remove_dir_all(&group)?;
+        let mut changed = std::collections::HashSet::new();
+        let event =
+            notify::Event::new(notify::EventKind::Remove(notify::event::RemoveKind::Folder))
+                .add_path(group);
+        assert!(collect_changed_paths(
+            agentoria_core::SessionSource::Claude,
+            root.path(),
+            Ok(event),
+            &mut changed
+        ));
+        assert!(
+            changed.is_empty(),
+            "directory notifications need reconciliation even without a JSONL path"
+        );
+        let (sender, receiver) = async_channel::unbounded();
+        reconcile_missing_sessions(
+            agentoria_core::SessionSource::Claude,
+            &mut index,
+            &token,
+            &sender,
+        )?;
+        assert!(matches!(receiver.try_recv()?,SourceLoadEvent::Removed(ids) if ids==vec![id]));
+        assert!(index
+            .list_files(agentoria_core::SessionSource::Claude)?
+            .is_empty());
+        Ok(())
+    }
 
     #[test]
     fn migrates_legacy_index_and_preferences_without_overwriting_new_data() -> Result<()> {

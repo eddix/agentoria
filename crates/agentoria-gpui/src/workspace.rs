@@ -81,9 +81,15 @@ pub struct WorkspaceView {
 
 impl WorkspaceView {
     pub fn new(preferences: Preferences, cx: &mut Context<Self>) -> Self {
+        let mut view = Self::empty(preferences, cx);
+        view.load_source(view.source, cx);
+        view
+    }
+
+    fn empty(preferences: Preferences, cx: &mut Context<Self>) -> Self {
         let index_path = index_path().unwrap_or_else(|_| PathBuf::from("index.sqlite"));
         let source = preferences.source();
-        let mut view = Self {
+        Self {
             mode: ContentMode::Sessions,
             source,
             sessions: Vec::new(),
@@ -112,9 +118,7 @@ impl WorkspaceView {
             source_events_task: None,
             session_task: None,
             preferences_task: None,
-        };
-        view.load_source(source, cx);
-        view
+        }
     }
 
     fn load_source(&mut self, source: SessionSource, cx: &mut Context<Self>) {
@@ -217,6 +221,22 @@ impl WorkspaceView {
                 if refresh_active {
                     self.select_session(file_id, cx);
                 }
+            }
+            SourceLoadEvent::Removed(ids) => {
+                let removed = ids.into_iter().collect::<HashSet<_>>();
+                self.sessions.retain(|file| !removed.contains(&file.id));
+                if self
+                    .selected_file_id
+                    .is_some_and(|id| removed.contains(&id))
+                {
+                    self.selected_file_id = None;
+                    self.active_session = None;
+                    self.session_loading = false;
+                    self.session_revision = self.session_revision.wrapping_add(1);
+                    self.session_task = None;
+                }
+                self.rebuild_session_items();
+                self.status_text = format!("{} sessions available", self.sessions.len());
             }
             SourceLoadEvent::FileError { path, message } => {
                 self.file_errors += 1;
@@ -1129,4 +1149,85 @@ fn short_path(path: &Path) -> String {
 
 fn short_timestamp(timestamp: &str) -> String {
     timestamp.get(0..16).unwrap_or(timestamp).replace('T', " ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+    use std::fs;
+
+    #[gpui::test]
+    fn removed_session_updates_groups_and_cancels_the_open_or_loading_view(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let mut database = IndexDatabase::open_in_memory().unwrap();
+        let mut files = Vec::new();
+        for name in ["a", "b"] {
+            let path = dir.path().join(format!("{name}.jsonl"));
+            fs::write(&path,"{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Question\"}}\n").unwrap();
+            files.push(
+                database
+                    .scan_file(
+                        SessionSource::Codex,
+                        path,
+                        &CancellationToken::default(),
+                        |_| {},
+                    )
+                    .unwrap()
+                    .file,
+            );
+        }
+        let removed_id = files[0].id;
+        let retained_id = files[1].id;
+        let view = cx.update(|cx| {
+            cx.new(|cx| {
+                let mut view = WorkspaceView::empty(
+                    Preferences {
+                        view_mode: ViewMode::Grouped,
+                        ..Preferences::default()
+                    },
+                    cx,
+                );
+                view.active_session = Some(cx.new(|cx| {
+                    SessionView::new(
+                        files[0].clone(),
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                        |_, _, _| {},
+                        cx,
+                    )
+                }));
+                view.sessions = files;
+                view.selected_file_id = Some(removed_id);
+                view.session_loading = true;
+                view.session_task = Some(cx.spawn(async |_, _| std::future::pending::<()>().await));
+                view.rebuild_session_items();
+                view
+            })
+        });
+        view.update(cx, |view, cx| {
+            let revision = view.session_revision;
+            view.apply_source_event(SourceLoadEvent::Removed(vec![removed_id]), cx);
+            assert_eq!(
+                view.sessions.iter().map(|file| file.id).collect::<Vec<_>>(),
+                [retained_id]
+            );
+            assert!(view.selected_file_id.is_none());
+            assert!(view.active_session.is_none());
+            assert!(!view.session_loading);
+            assert!(view.session_task.is_none());
+            assert_eq!(view.session_revision, revision + 1);
+            assert!(matches!(
+                view.session_items.first(),
+                Some(SessionListItem::Group { count: 1, .. })
+            ));
+            view.selected_file_id = Some(retained_id);
+            view.apply_source_event(SourceLoadEvent::Removed(vec![removed_id]), cx);
+            assert_eq!(view.selected_file_id, Some(retained_id));
+        });
+    }
 }

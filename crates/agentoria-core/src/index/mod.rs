@@ -307,6 +307,57 @@ impl IndexDatabase {
         )
     }
 
+    /// Drop rebuildable index entries whose source files are confirmed missing.
+    /// Permission and other I/O errors retain the entry for a later retry.
+    pub fn prune_missing_files(
+        &mut self,
+        source: SessionSource,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<i64>> {
+        let mut missing = Vec::new();
+        for file in self.list_files(source)? {
+            if cancellation.is_cancelled() {
+                bail!("session index reconciliation cancelled");
+            }
+            if source_file_missing(&file.path) {
+                missing.push(file);
+            }
+        }
+        if cancellation.is_cancelled() {
+            bail!("session index reconciliation cancelled");
+        }
+        if missing.is_empty() {
+            return Ok(Vec::new());
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut removed = Vec::with_capacity(missing.len());
+        for file in missing {
+            if cancellation.is_cancelled() {
+                bail!("session index reconciliation cancelled");
+            }
+            // A rename/replacement may have restored the path during discovery.
+            if source_file_missing(&file.path)
+                && transaction.execute(
+                    "DELETE FROM files WHERE id = ?1 AND source = ?2 AND path = ?3",
+                    params![
+                        file.id,
+                        source_name(source),
+                        file.path.to_string_lossy().as_ref()
+                    ],
+                )? > 0
+            {
+                removed.push(file.id);
+            }
+        }
+        if cancellation.is_cancelled() {
+            bail!("session index reconciliation cancelled");
+        }
+        transaction.commit()?;
+        Ok(removed)
+    }
+
     pub fn process_lines(&self, file_id: i64) -> Result<Vec<IndexedLine>> {
         self.query_lines(file_id, "l.process_count > 0")
     }
@@ -1141,6 +1192,13 @@ fn read_range(path: &Path, offset: u64, len: u64) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+fn source_file_missing(path: &Path) -> bool {
+    match fs::metadata(path) {
+        Ok(metadata) => !metadata.is_file(),
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
 fn trim_line_ending(mut bytes: &[u8]) -> &[u8] {
     if bytes.last() == Some(&b'\n') {
         bytes = &bytes[..bytes.len() - 1];
@@ -1522,6 +1580,80 @@ mod tests {
         path: &Path,
     ) -> Result<super::ScanOutcome> {
         index.scan_file(source, path, &CancellationToken::default(), |_| {})
+    }
+
+    #[test]
+    fn pruning_removes_missing_source_rows_and_dependents_but_keeps_other_sources() -> Result<()> {
+        let dir = tempdir()?;
+        let gone = dir.path().join("gone.jsonl");
+        let live = dir.path().join("live.jsonl");
+        let codex = dir.path().join("codex.jsonl");
+        let record = "{\"type\":\"user\",\"message\":{\"content\":\"Question\"}}\ninvalid\n";
+        fs::write(&gone, record)?;
+        fs::write(&live, record)?;
+        write_lines(
+            &codex,
+            &[codex_user("Other source", "2026-10-28T00:00:00Z")],
+        )?;
+        let mut index = IndexDatabase::open_in_memory()?;
+        let gone_id = scan(&mut index, SessionSource::Claude, &gone)?.file.id;
+        let live_id = scan(&mut index, SessionSource::Claude, &live)?.file.id;
+        let codex_id = scan(&mut index, SessionSource::Codex, &codex)?.file.id;
+        fs::remove_file(&gone)?;
+        fs::remove_file(&codex)?;
+        let removed =
+            index.prune_missing_files(SessionSource::Claude, &CancellationToken::default())?;
+        assert_eq!(removed, [gone_id]);
+        assert_eq!(
+            index
+                .list_files(SessionSource::Claude)?
+                .iter()
+                .map(|file| file.id)
+                .collect::<Vec<_>>(),
+            [live_id]
+        );
+        assert_eq!(index.list_files(SessionSource::Codex)?.len(), 1);
+        assert!(index.conversation_lines(gone_id)?.is_empty());
+        let errors: i64 = index.connection.query_row(
+            "SELECT COUNT(*) FROM index_errors WHERE file_id = ?1",
+            [gone_id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(errors, 0);
+        assert_eq!(fs::read_to_string(&live)?, record);
+        assert_eq!(
+            index.prune_missing_files(SessionSource::Codex, &CancellationToken::default())?,
+            [codex_id]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cancelled_or_failed_pruning_preserves_the_index_transaction() -> Result<()> {
+        let dir = tempdir()?;
+        let mut index = IndexDatabase::open_in_memory()?;
+        let mut ids = Vec::new();
+        for name in ["a", "b"] {
+            let path = dir.path().join(format!("{name}.jsonl"));
+            write_lines(&path, &[codex_user(name, "2026-10-28T00:00:00Z")])?;
+            ids.push(scan(&mut index, SessionSource::Codex, &path)?.file.id);
+            fs::remove_file(path)?;
+        }
+        let token = CancellationToken::default();
+        token.cancel();
+        assert!(index
+            .prune_missing_files(SessionSource::Codex, &token)
+            .is_err());
+        assert_eq!(index.list_files(SessionSource::Codex)?.len(), 2);
+        index.connection.execute_batch(&format!("CREATE TRIGGER reject_second_delete BEFORE DELETE ON files WHEN old.id = {} BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",ids[1]))?;
+        assert!(index
+            .prune_missing_files(SessionSource::Codex, &CancellationToken::default())
+            .is_err());
+        assert_eq!(index.list_files(SessionSource::Codex)?.len(), 2);
+        for id in ids {
+            assert_eq!(index.conversation_lines(id)?.len(), 1);
+        }
+        Ok(())
     }
 
     fn write_lines(path: &Path, lines: &[Value]) -> Result<()> {

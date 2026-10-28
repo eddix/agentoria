@@ -82,6 +82,13 @@ pub fn session_file_for_event(source: SessionSource, root: &Path, path: &Path) -
         if path.file_name()?.to_str()? == "summary.json" {
             return grok::preferred_transcript(path.parent()?);
         }
+        if matches!(
+            path.file_name()?.to_str()?,
+            "updates.jsonl" | "chat_history.jsonl"
+        ) && matches!(path.try_exists(), Ok(false))
+        {
+            return grok::preferred_transcript(path.parent()?);
+        }
     }
     is_session_file(source, path).then(|| path.to_path_buf())
 }
@@ -194,6 +201,15 @@ mod tests {
                 &session.join("compaction/updates.jsonl")
             ),
             None
+        );
+        fs::remove_file(session.join("updates.jsonl")).unwrap();
+        assert_eq!(
+            session_file_for_event(
+                SessionSource::Grok,
+                dir.path(),
+                &session.join("updates.jsonl")
+            ),
+            Some(history)
         );
         assert_eq!(parse_source("grok-build").unwrap(), SessionSource::Grok);
         assert_eq!(
