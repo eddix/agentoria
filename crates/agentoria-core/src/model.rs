@@ -6,6 +6,7 @@ use serde_json::Value;
 pub enum SessionSource {
     Claude,
     Codex,
+    Grok,
 }
 
 #[derive(Debug, Clone, Serialize)]

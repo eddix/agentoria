@@ -81,6 +81,7 @@ impl Preferences {
     pub fn source(&self) -> SessionSource {
         match self.source.as_str() {
             "claude" => SessionSource::Claude,
+            "grok" => SessionSource::Grok,
             _ => SessionSource::Codex,
         }
     }
@@ -89,6 +90,7 @@ impl Preferences {
         self.source = match source {
             SessionSource::Claude => "claude",
             SessionSource::Codex => "codex",
+            SessionSource::Grok => "grok",
         }
         .to_string();
     }
@@ -146,6 +148,7 @@ mod tests {
             hide_subagents: false,
             ..Preferences::default()
         };
+        preferences.set_source(agentoria_core::SessionSource::Grok);
         preferences.set_scroll_anchor(
             &session,
             ScrollAnchor {
@@ -157,6 +160,7 @@ mod tests {
         preferences.save_to(&path)?;
 
         let loaded = Preferences::load_from(&path);
+        assert_eq!(loaded.source(), agentoria_core::SessionSource::Grok);
         assert_eq!(loaded.active_theme_name(), "Everforest Dark");
         assert_eq!(loaded.light_theme, "Flexoki Light");
         assert_eq!(loaded.dark_theme, "Everforest Dark");

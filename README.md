@@ -2,9 +2,9 @@
 
 Agentoria is a read-only macOS app for browsing local coding-agent sessions and skills.
 
-- Browse Claude Code and Codex conversations by recency or workspace. Long transcripts are indexed incrementally and rendered lazily.
+- Browse Claude Code, Codex, and Grok Build conversations by recency or workspace. Long transcripts are indexed incrementally and rendered lazily.
 - Find USER/ASSISTANT message text with `⌘F` or the transcript's **Find** button. Matching ignores case and searches the Markdown source. Use `Enter` / `Shift+Enter` or `⌘G` / `⌘⇧G` to cycle through matches, and `Esc` to close. The search bar reports skipped large or unreadable records and any result limit.
-- Browse local Skills for Claude Code, Codex, Kimi, ZCode, and Trae. Open Markdown, images, and source files from a collapsible file tree; scripts use a highlighted, read-only code editor.
+- Browse local Skills for Claude Code, Codex, Grok Build, Kimi, ZCode, and Trae. Open Markdown, images, and source files from a collapsible file tree; scripts use a highlighted, read-only code editor.
 - Follow links between files inside a Skill. Paths and symlinks cannot navigate outside its directory.
 - Switch between the built-in light and dark themes. Preferences and the rebuildable SQLite index stay on your Mac.
 - Quit with `⌘Q`, the application menu, or by closing the last window.
@@ -28,6 +28,8 @@ This builds the release binary, ad-hoc signs it, installs `~/Applications/Agento
 Run the tests with `cargo test --workspace --locked`.
 
 ## Local data
+
+Grok Build sessions are read from `~/.grok/sessions/` (or `$GROK_HOME/sessions/`). Agentoria prefers the complete `updates.jsonl` timeline, merges adjacent text chunks, and falls back to `chat_history.jsonl` for older sessions. It reads titles, workspace, model, and session dates from `summary.json`; changes to that file refresh the list without rescanning the transcript. Grok Skills browsing includes built-in skills in `~/.grok/bundled/skills` and the standard `.grok`, `.agents`, `.claude`, and `.cursor` user/project `skills/` and `commands/` directories; custom runtime configuration and plugin caches are outside this catalog.
 
 The index and preferences live in `~/Library/Application Support/Agentoria/`. The index stores offsets and metadata, not full transcript bodies; it can be rebuilt from your local sessions. On first launch, Agentoria copies preferences and migrates the index from an existing Sessionary installation without deleting the old data.
 

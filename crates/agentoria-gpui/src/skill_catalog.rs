@@ -20,15 +20,17 @@ const TREE_DEPTH_LIMIT: usize = 16;
 pub enum SkillAgent {
     Claude,
     Codex,
+    Grok,
     Kimi,
     ZCode,
     Trae,
 }
 
 impl SkillAgent {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Claude,
         Self::Codex,
+        Self::Grok,
         Self::Kimi,
         Self::ZCode,
         Self::Trae,
@@ -38,6 +40,7 @@ impl SkillAgent {
         match self {
             Self::Claude => "Claude Code",
             Self::Codex => "Codex",
+            Self::Grok => "Grok Build",
             Self::Kimi => "Kimi",
             Self::ZCode => "ZCode",
             Self::Trae => "Trae",
@@ -179,6 +182,23 @@ pub fn roots(agent: SkillAgent, home: &Path, project: Option<&Path>) -> Vec<Skil
                 false,
             );
         }
+        SkillAgent::Grok => {
+            add(
+                home.join(".grok/bundled/skills"),
+                "Grok built-in",
+                SkillScope::BuiltIn,
+                false,
+            );
+            for (directory, origin, scope) in [
+                (".grok", "Grok Build", SkillScope::User),
+                (".agents", "Agent Skills", SkillScope::Shared),
+                (".claude", "Claude Code", SkillScope::Shared),
+                (".cursor", "Cursor", SkillScope::Shared),
+            ] {
+                add(home.join(directory).join("skills"), origin, scope, false);
+                add(home.join(directory).join("commands"), origin, scope, true);
+            }
+        }
         SkillAgent::Kimi => {
             add(home.join(".kimi/skills"), "Kimi", SkillScope::User, true);
             add(
@@ -246,6 +266,27 @@ pub fn roots(agent: SkillAgent, home: &Path, project: Option<&Path>) -> Vec<Skil
                     SkillScope::Project,
                     false,
                 );
+            }
+            SkillAgent::Grok => {
+                for (directory, origin) in [
+                    (".grok", "Grok Build"),
+                    (".agents", "Agent Skills"),
+                    (".claude", "Claude Code"),
+                    (".cursor", "Cursor"),
+                ] {
+                    add(
+                        project.join(directory).join("skills"),
+                        origin,
+                        SkillScope::Project,
+                        false,
+                    );
+                    add(
+                        project.join(directory).join("commands"),
+                        origin,
+                        SkillScope::Project,
+                        true,
+                    );
+                }
             }
             SkillAgent::Kimi => {
                 for (directory, origin) in [
@@ -883,6 +924,49 @@ mod tests {
     }
 
     #[test]
+    fn grok_catalog_includes_native_shared_and_project_command_roots() {
+        let home = tempdir().unwrap();
+        let project = tempdir().unwrap();
+        for (root, relative, body) in [
+            (
+                home.path(),
+                ".grok/bundled/skills/builtin/SKILL.md",
+                "---\nname: grok-builtin\n---\n# Built-in",
+            ),
+            (
+                home.path(),
+                ".grok/skills/native/SKILL.md",
+                "---\nname: grok-native\ndescription: Native Grok skill\n---\n# Native",
+            ),
+            (
+                home.path(),
+                ".claude/skills/compat/SKILL.md",
+                "---\nname: claude-compat\n---\n# Compat",
+            ),
+            (
+                project.path(),
+                ".grok/commands/local.md",
+                "---\nname: local-command\n---\n# Command",
+            ),
+        ] {
+            let path = root.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, body).unwrap();
+        }
+        let result = discover(&roots(SkillAgent::Grok, home.path(), Some(project.path())));
+        assert!(result.errors.is_empty());
+        let names = result
+            .skills
+            .iter()
+            .map(|skill| skill.name.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        assert!(names.contains("grok-native"));
+        assert!(names.contains("grok-builtin"));
+        assert!(names.contains("claude-compat"));
+        assert!(names.contains("local-command"));
+    }
+
+    #[test]
     fn agent_roots_include_their_user_and_project_locations() {
         let home = tempdir().unwrap();
         let project = tempdir().unwrap();
@@ -892,6 +976,7 @@ mod tests {
         for (agent, user, local) in [
             (SkillAgent::Claude, ".claude/skills", ".claude/skills"),
             (SkillAgent::Codex, ".codex/skills", ".agents/skills"),
+            (SkillAgent::Grok, ".grok/skills", ".grok/skills"),
             (SkillAgent::Kimi, ".kimi/skills", ".kimi/skills"),
             (SkillAgent::ZCode, ".zcode/skills", ".zcode/skills"),
             (SkillAgent::Trae, ".trae-cn/skills", ".trae/skills"),

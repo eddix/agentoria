@@ -19,6 +19,13 @@ pub fn claude_root() -> Result<PathBuf> {
     Ok(home_dir()?.join(".claude").join("projects"))
 }
 
+pub fn grok_root() -> Result<PathBuf> {
+    std::env::var_os("GROK_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .map_or_else(|| Ok(home_dir()?.join(".grok")), Ok)
+}
+
 pub fn metadata_timestamp(path: &Path) -> Result<String> {
     let metadata = fs::metadata(path)
         .with_context(|| format!("failed to read metadata for {}", path.display()))?;

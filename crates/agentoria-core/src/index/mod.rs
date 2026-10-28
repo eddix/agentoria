@@ -186,6 +186,23 @@ impl IndexDatabase {
         let stored = self.stored_file(source, &canonical)?;
         let mode = scan_mode(&canonical, identity, stored.as_ref())?;
         if mode == ScanStatus::Unchanged {
+            if source == SessionSource::Grok {
+                let transaction = self
+                    .connection
+                    .transaction_with_behavior(TransactionBehavior::Immediate)?;
+                refresh_grok_metadata(
+                    &transaction,
+                    stored
+                        .as_ref()
+                        .context("unchanged session requires stored metadata")?
+                        .id,
+                    &canonical,
+                )?;
+                if cancellation.is_cancelled() {
+                    bail!("session index scan cancelled");
+                }
+                transaction.commit()?;
+            }
             let file = self
                 .indexed_file(source, &canonical)?
                 .context("unchanged index entry disappeared")?;
@@ -217,6 +234,12 @@ impl IndexDatabase {
             cancellation,
             on_progress,
         )?;
+        if source == SessionSource::Grok {
+            refresh_grok_metadata(&transaction, file_id, &canonical)?;
+        }
+        if cancellation.is_cancelled() {
+            bail!("session index scan cancelled");
+        }
         transaction
             .commit()
             .context("failed to commit session index transaction")?;
@@ -443,6 +466,30 @@ pub fn load_conversation_line(
     }
 
     let bytes = read_range(&line.path, line.byte_offset, line.byte_len)?;
+    if line.source == SessionSource::Grok {
+        let mut text = String::new();
+        let mut model = None;
+        for value in serde_json::Deserializer::from_slice(&bytes).into_iter::<Value>() {
+            let value = value.context("failed to decode indexed Grok message")?;
+            let (loaded_kind, content, message_model, _) =
+                extract_conversation_text(line.source, &value)
+                    .context("indexed Grok conversation changed")?;
+            if loaded_kind != kind {
+                bail!("indexed Grok conversation kind changed");
+            }
+            text.push_str(&content);
+            if message_model.is_some() {
+                model = message_model;
+            }
+        }
+        return Ok(Some(ConversationBody::Loaded(ConversationMessage {
+            kind,
+            text,
+            model,
+            stop_reason: None,
+            source_bytes: line.byte_len,
+        })));
+    }
     let value: Value = serde_json::from_slice(trim_line_ending(&bytes)).with_context(|| {
         format!(
             "failed to decode indexed line {} from {}",
@@ -624,6 +671,30 @@ fn ensure_file_row(
         return Ok(id);
     }
 
+    if source == SessionSource::Grok {
+        let alternate = path.with_file_name(
+            if path.file_name().and_then(|name| name.to_str()) == Some(crate::grok::UPDATES) {
+                crate::grok::HISTORY
+            } else {
+                crate::grok::UPDATES
+            },
+        );
+        let previous: Option<i64> = transaction
+            .query_row(
+                "SELECT id FROM files WHERE source = 'grok' AND path = ?1",
+                [alternate.to_string_lossy().as_ref()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(id) = previous {
+            transaction.execute(
+                "UPDATE files SET path = ?2 WHERE id = ?1",
+                params![id, path.to_string_lossy().as_ref()],
+            )?;
+            return Ok(id);
+        }
+    }
+
     transaction.execute(
         r#"
         INSERT INTO files (
@@ -767,12 +838,32 @@ fn scan_lines(
             &descriptor,
             state.previous_assistant.as_ref(),
         )?;
+        let mut source_offset = line_offset;
+        if source == SessionSource::Grok
+            && descriptor.conversation_kind.is_some()
+            && matches!(
+                descriptor.event_type.as_str(),
+                "grok.user_message_chunk" | "grok.agent_message_chunk"
+            )
+            && (descriptor.conversation_kind == Some(ConversationKind::Assistant)
+                || descriptor.message_key.is_some())
+        {
+            let previous: Option<(i64, u64)> = transaction.query_row(
+                "SELECT ordinal, byte_offset FROM lines WHERE file_id = ?1 AND ordinal = ?2 AND event_type = ?3 AND conversation_suppressed = 0 AND conversation_kind = ?4 AND message_key IS ?5",
+                params![file_id, sql_i64(line_number.saturating_sub(1))?, descriptor.event_type, descriptor.conversation_kind.map(|kind| kind as i64), descriptor.message_key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ).optional()?;
+            if let Some((ordinal, offset)) = previous {
+                transaction.execute("UPDATE lines SET conversation_suppressed = 1 WHERE file_id = ?1 AND ordinal = ?2", params![file_id, ordinal])?;
+                source_offset = offset;
+            }
+        }
         insert_line(
             transaction,
             file_id,
             line_number,
-            line_offset,
-            u64::try_from(read)?,
+            source_offset,
+            state.offset - source_offset,
             &descriptor,
             suppressed,
         )?;
@@ -990,6 +1081,15 @@ fn update_file_summary(
     Ok(())
 }
 
+fn refresh_grok_metadata(transaction: &Transaction<'_>, file_id: i64, path: &Path) -> Result<()> {
+    let metadata = crate::grok::metadata(path);
+    transaction.execute(
+        "UPDATE files SET session_id = ?2, title = COALESCE(?3, title), working_dir = COALESCE(?4, working_dir), git_branch = COALESCE(?5, git_branch), model = COALESCE(?6, model), started_at = COALESCE(?7, started_at), updated_at = CASE WHEN ?8 IS NULL THEN updated_at WHEN ?9 THEN MAX(updated_at, ?8) ELSE ?8 END WHERE id = ?1",
+        params![file_id, metadata.id, metadata.title, metadata.cwd, metadata.branch, metadata.model, metadata.created_at, metadata.updated_at, path.file_name().and_then(|name| name.to_str()) == Some(crate::grok::UPDATES)],
+    )?;
+    Ok(())
+}
+
 fn descriptor_previous_assistant(descriptor: &LineDescriptor) -> Option<PreviousAssistant> {
     if descriptor.conversation_kind != Some(ConversationKind::Assistant) {
         return None;
@@ -1082,6 +1182,7 @@ fn source_name(source: SessionSource) -> &'static str {
     match source {
         SessionSource::Claude => "claude",
         SessionSource::Codex => "codex",
+        SessionSource::Grok => "grok",
     }
 }
 
@@ -1113,6 +1214,7 @@ fn source_from_name(value: &str) -> rusqlite::Result<SessionSource> {
     match value {
         "claude" => Ok(SessionSource::Claude),
         "codex" => Ok(SessionSource::Codex),
+        "grok" => Ok(SessionSource::Grok),
         _ => Err(rusqlite::Error::FromSqlConversionFailure(
             1,
             rusqlite::types::Type::Text,

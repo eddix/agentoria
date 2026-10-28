@@ -2,11 +2,11 @@
 
 ## Overview
 
-Agentoria is a native macOS GPUI application for browsing local Claude Code and Codex JSONL sessions and Agent Skills. It is read-only with respect to the agent source directories.
+Agentoria is a native macOS GPUI application for browsing local Claude Code, Codex, and Grok Build JSONL sessions and Agent Skills. It is read-only with respect to the agent source directories.
 
 The application is a Cargo workspace:
 
-- `crates/agentoria-core`: source discovery, Claude/Codex parsing, SQLite byte-offset index, lazy record loading, and benchmarks.
+- `crates/agentoria-core`: source discovery, Claude/Codex/Grok parsing, SQLite byte-offset index, lazy record loading, and benchmarks.
 - `crates/agentoria-gpui`: GPUI application state, virtualized session/transcript and skill views, Markdown, process/raw drawers, preferences, file watching, and packaging entry points.
 
 The final Tauri implementation is preserved by the `tauri-final` git tag. Do not reintroduce WebView, React, or Tauri dependencies on main.
@@ -55,7 +55,9 @@ The SQLite index is a rebuildable cache. It stores file identity, timestamps, by
 - A final JSONL record without a newline is pending, not corrupt. Leave `scanned_offset` before it and retry after the next append.
 - A malformed complete interior line is recorded in `index_errors`, skipped, and does not make the full session unreadable.
 - Scanner cancellation must roll back the current SQLite transaction.
-- Never write into Claude or Codex source directories.
+- Never write into Claude, Codex, or Grok source directories.
+- Grok's `updates.jsonl` is the authoritative complete timeline. Prefer it over the model-context `chat_history.jsonl`, which can shrink after compaction; discover exactly one transcript per session at `<sessions>/<cwd-group>/<session-id>/`. Ignore event/rewind/checkpoint logs. Read bounded `summary.json` metadata even on unchanged scans, and map summary file-watch events back to the canonical transcript.
+- Grok ACP text chunks have millisecond timestamps and are merged only when adjacent (user chunks must also share `promptIndex`). The last chunk retains an unsuppressed byte span over the whole message; lazy loading concatenates that span's JSON records. Preserve whitespace-only chunks and enforce the same inline source-byte limit on the complete span. Switching between Grok transcript formats reuses the file ID and rebuilds offsets in the same cancellable transaction.
 
 The Preview and formal channels use isolated directories:
 
@@ -71,7 +73,7 @@ On first launch, Agentoria copies preferences and uses SQLite's online backup AP
 - `SessionView` owns transcript virtualization, layout-driven body loading, bounded LRU state, tail following, scroll anchors, and Markdown/Raw mode. Only one body-load batch (up to 16 records) runs at a time on GPUI's background executor; the next batch follows the latest rendered range and obsolete results are discarded. The cache holds up to 128 entries / 64 MiB of actual text, with currently rendered rows protected from eviction; oversized records count as metadata, not resident source bytes. Read failures stay visible until an explicit retry or cache eviction.
 - Transcript text uses `SharedString`; process metadata is shared as `Arc<[IndexedLine]>` between the summary and drawer. Do not deep-clone either on every frame.
 - In-session Find scans indexed USER/ASSISTANT text on the background executor after a 200 ms debounce. Query revisions and a cancellation token prevent stale results; session drop cancels scanning. Only UTF-8 source ranges are retained (first 10,000 matches, with the complete total count). Records above the 512 KiB inline source limit and unreadable records are counted explicitly in the search bar. The active Markdown match owns a single parsed text entity, maps its source range to rendered text, and uses theme-aware highlights; Raw mode highlights source text. Process payloads are outside this search scope.
-- `SkillsView` scans a fixed set of Claude Code, Codex, Kimi, ZCode, and Trae user/project skill roots on a background thread. The list reads bounded metadata; selecting a skill scans its bounded directory tree and loads local Markdown, source, or image files on demand. A collapsible, independently resizable right pane virtualizes the file tree. Text files are capped at 2 MiB and images at 20 MiB. Symlinks and Markdown links cannot navigate outside the selected skill. It does not scan plugin caches or remote/cloud skills.
+- `SkillsView` scans a fixed set of Claude Code, Codex, Grok Build, Kimi, ZCode, and Trae user/project skill roots on a background thread. The list reads bounded metadata; selecting a skill scans its bounded directory tree and loads local Markdown, source, or image files on demand. A collapsible, independently resizable right pane virtualizes the file tree. Text files are capped at 2 MiB and images at 20 MiB. Symlinks and Markdown links cannot navigate outside the selected skill. It does not scan plugin caches or remote/cloud skills.
 - Skill filtering runs only over scanned names and full descriptions for the selected Agent. Name prefix/substring/subsequence matches outrank description matches; the query is cleared on Agent changes and retained when switching between Sessions and Skills.
 - Process and oversized raw records use paged drawers. Never materialize an entire large session or oversized line in the UI.
 - Use `gpui::list` for variable-height transcripts. Do not replace it with `gpui_component::VirtualList`, which requires caller-supplied exact item sizes.

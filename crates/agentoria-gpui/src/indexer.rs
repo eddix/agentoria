@@ -9,7 +9,7 @@ use std::{
 use agentoria_core::{
     discover_session_files,
     index::{CancellationToken, IndexDatabase, IndexedFile, ScanProgress},
-    load_session_titles, source_root, SessionSource,
+    load_session_titles, session_file_for_event, source_root, SessionSource,
 };
 use anyhow::{Context, Result};
 use async_channel::Sender;
@@ -184,6 +184,9 @@ fn watch_source(
     if !root.exists() {
         return Ok(());
     }
+    let root = root
+        .canonicalize()
+        .context("failed to resolve session watch directory")?;
     let (watch_sender, watch_receiver) = mpsc::channel();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<Event>| {
         watch_sender.send(event).ok();
@@ -197,10 +200,10 @@ fn watch_source(
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
         let mut changed = HashSet::new();
-        collect_changed_paths(first, &mut changed);
+        collect_changed_paths(source, &root, first, &mut changed);
         std::thread::sleep(Duration::from_millis(150));
         while let Ok(event) = watch_receiver.try_recv() {
-            collect_changed_paths(event, &mut changed);
+            collect_changed_paths(source, &root, event, &mut changed);
         }
 
         let total_files = database.list_files(source)?.len().max(1);
@@ -250,7 +253,12 @@ fn watch_source(
     Ok(())
 }
 
-fn collect_changed_paths(event: notify::Result<Event>, paths: &mut HashSet<PathBuf>) {
+fn collect_changed_paths(
+    source: SessionSource,
+    root: &Path,
+    event: notify::Result<Event>,
+    paths: &mut HashSet<PathBuf>,
+) {
     let Ok(event) = event else {
         return;
     };
@@ -264,7 +272,7 @@ fn collect_changed_paths(event: notify::Result<Event>, paths: &mut HashSet<PathB
         event
             .paths
             .into_iter()
-            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("jsonl")),
+            .filter_map(|path| session_file_for_event(source, root, &path)),
     );
 }
 

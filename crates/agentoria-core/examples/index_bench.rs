@@ -10,15 +10,15 @@ fn main() -> Result<()> {
     let mut arguments = env::args().skip(1);
     let source = arguments
         .next()
-        .context("usage: index_bench <claude|codex> <session.jsonl>")?;
+        .context("usage: index_bench <claude|codex|grok> <session.jsonl>")?;
     let source = agentoria_core::parse_source(&source)?;
     let session = PathBuf::from(
         arguments
             .next()
-            .context("usage: index_bench <claude|codex> <session.jsonl>")?,
+            .context("usage: index_bench <claude|codex|grok> <session.jsonl>")?,
     );
     if arguments.next().is_some() {
-        bail!("usage: index_bench <claude|codex> <session.jsonl>");
+        bail!("usage: index_bench <claude|codex|grok> <session.jsonl>");
     }
     run(source, session)
 }
@@ -52,6 +52,7 @@ fn run(source: SessionSource, session: PathBuf) -> Result<()> {
         match source {
             SessionSource::Claude => "claude",
             SessionSource::Codex => "codex",
+            SessionSource::Grok => "grok",
         },
         outcome.file.file_size,
         outcome.file.line_count,

@@ -26,6 +26,7 @@ pub(super) fn classify_line(source: SessionSource, value: &Value) -> LineDescrip
     match source {
         SessionSource::Claude => classify_claude(value),
         SessionSource::Codex => classify_codex(value),
+        SessionSource::Grok => classify_grok(value),
     }
 }
 
@@ -36,6 +37,7 @@ pub(super) fn extract_conversation_text(
     match source {
         SessionSource::Claude => extract_claude_conversation(value),
         SessionSource::Codex => extract_codex_conversation(value),
+        SessionSource::Grok => crate::grok::conversation(value),
     }
 }
 
@@ -47,6 +49,36 @@ pub(super) fn extract_process_events(
     match source {
         SessionSource::Claude => extract_claude_process(value, line_number),
         SessionSource::Codex => extract_codex_process(value, line_number),
+        SessionSource::Grok => crate::grok::process_events(value, line_number),
+    }
+}
+
+fn classify_grok(value: &Value) -> LineDescriptor {
+    let conversation = crate::grok::conversation(value);
+    LineDescriptor {
+        event_type: format!("grok.{}", crate::grok::kind(value)),
+        timestamp: crate::grok::timestamp(value),
+        conversation_kind: conversation.as_ref().map(|(kind, ..)| *kind),
+        process_count: crate::grok::process_count(value),
+        message_key: crate::grok::message_key(value),
+        message_hash: conversation.as_ref().map(|(_, text, ..)| hash_text(text)),
+        assistant_source: conversation
+            .as_ref()
+            .filter(|(kind, ..)| *kind == ConversationKind::Assistant)
+            .map(|_| "grok.assistant".to_string()),
+        session_id: value
+            .pointer("/params/sessionId")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        title: conversation
+            .as_ref()
+            .filter(|(kind, ..)| *kind == ConversationKind::User)
+            .and_then(|(_, text, ..)| crate::util::clean_title(Some(text))),
+        working_dir: None,
+        git_branch: None,
+        model: conversation.and_then(|(_, _, model, _)| model),
+        parent_session_id: None,
+        is_sidechain: false,
     }
 }
 

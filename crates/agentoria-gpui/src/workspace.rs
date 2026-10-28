@@ -373,6 +373,7 @@ impl WorkspaceView {
             let agent = match self.source {
                 SessionSource::Claude => SkillAgent::Claude,
                 SessionSource::Codex => SkillAgent::Codex,
+                SessionSource::Grok => SkillAgent::Grok,
             };
             let workspace = self
                 .selected_file_id
@@ -518,6 +519,7 @@ impl WorkspaceView {
             .unwrap_or(match source {
                 SessionSource::Claude => SkillAgent::Claude,
                 SessionSource::Codex => SkillAgent::Codex,
+                SessionSource::Grok => SkillAgent::Grok,
             });
         let source_button: AnyElement = if self.mode == ContentMode::Sessions {
             Button::new("source-menu")
@@ -528,6 +530,7 @@ impl WorkspaceView {
                 .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
                     let claude_weak = source_weak.clone();
                     let codex_weak = source_weak.clone();
+                    let grok_weak = source_weak.clone();
                     menu.label("Session Source")
                         .item(
                             PopupMenuItem::new("Claude")
@@ -544,6 +547,15 @@ impl WorkspaceView {
                                 .on_click(move |_, _, cx| {
                                     let _ = codex_weak.update(cx, |view, cx| {
                                         view.load_source(SessionSource::Codex, cx)
+                                    });
+                                }),
+                        )
+                        .item(
+                            PopupMenuItem::new("Grok Build")
+                                .checked(source == SessionSource::Grok)
+                                .on_click(move |_, _, cx| {
+                                    let _ = grok_weak.update(cx, |view, cx| {
+                                        view.load_source(SessionSource::Grok, cx)
                                     });
                                 }),
                         )
@@ -1058,6 +1070,7 @@ fn source_label(source: SessionSource) -> &'static str {
     match source {
         SessionSource::Claude => "Claude",
         SessionSource::Codex => "Codex",
+        SessionSource::Grok => "Grok Build",
     }
 }
 
