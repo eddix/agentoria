@@ -186,18 +186,23 @@ impl IndexDatabase {
         let stored = self.stored_file(source, &canonical)?;
         let mode = scan_mode(&canonical, identity, stored.as_ref())?;
         if mode == ScanStatus::Unchanged {
-            if source == SessionSource::Grok {
+            if matches!(source, SessionSource::Codex | SessionSource::Grok) {
                 let transaction = self
                     .connection
                     .transaction_with_behavior(TransactionBehavior::Immediate)?;
-                refresh_grok_metadata(
-                    &transaction,
-                    stored
-                        .as_ref()
-                        .context("unchanged session requires stored metadata")?
-                        .id,
-                    &canonical,
-                )?;
+                let stored = stored
+                    .as_ref()
+                    .context("unchanged session requires stored metadata")?;
+                if source == SessionSource::Grok {
+                    refresh_grok_metadata(&transaction, stored.id, &canonical)?;
+                } else {
+                    refresh_codex_relationship(
+                        &transaction,
+                        stored.id,
+                        stored.session_id.as_deref(),
+                        &canonical,
+                    )?;
+                }
                 if cancellation.is_cancelled() {
                     bail!("session index scan cancelled");
                 }
@@ -236,6 +241,8 @@ impl IndexDatabase {
         )?;
         if source == SessionSource::Grok {
             refresh_grok_metadata(&transaction, file_id, &canonical)?;
+        } else if source == SessionSource::Codex {
+            refresh_codex_relationship(&transaction, file_id, None, &canonical)?;
         }
         if cancellation.is_cancelled() {
             bail!("session index scan cancelled");
@@ -275,6 +282,33 @@ impl IndexDatabase {
             )
             .optional()
             .context("failed to query indexed session")
+    }
+
+    /// Refresh auxiliary-session flags before publishing a cached Codex list.
+    /// This repairs older classifier results without rebuilding transcript offsets.
+    /// Unreadable or incomplete source metadata retains its existing flags.
+    pub fn refresh_codex_relationships(&mut self, cancellation: &CancellationToken) -> Result<()> {
+        let files = self.list_files(SessionSource::Codex)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for file in files {
+            if cancellation.is_cancelled() {
+                bail!("session metadata refresh cancelled");
+            }
+            refresh_codex_relationship(
+                &transaction,
+                file.id,
+                file.session_id.as_deref(),
+                &file.path,
+            )?;
+        }
+        if cancellation.is_cancelled() {
+            bail!("session metadata refresh cancelled");
+        }
+        transaction
+            .commit()
+            .context("failed to commit Codex relationship refresh")
     }
 
     pub fn list_files(&self, source: SessionSource) -> Result<Vec<IndexedFile>> {
@@ -1132,6 +1166,31 @@ fn update_file_summary(
     Ok(())
 }
 
+fn refresh_codex_relationship(
+    transaction: &Transaction<'_>,
+    file_id: i64,
+    expected_session_id: Option<&str>,
+    path: &Path,
+) -> Result<()> {
+    let Ok(Some(payload)) = crate::codex::read_session_meta(path) else {
+        return Ok(());
+    };
+    if let (Some(expected), Some(actual)) = (
+        expected_session_id,
+        payload.get("id").and_then(Value::as_str),
+    ) {
+        if expected != actual {
+            return Ok(());
+        }
+    }
+    let (is_sidechain, parent) = crate::codex::session_relationship(&payload);
+    transaction.execute(
+        "UPDATE files SET is_sidechain = ?2, parent_session_id = ?3 WHERE id = ?1 AND source = 'codex' AND (is_sidechain != ?2 OR parent_session_id IS NOT ?3)",
+        params![file_id, is_sidechain, parent],
+    )?;
+    Ok(())
+}
+
 fn refresh_grok_metadata(transaction: &Transaction<'_>, file_id: i64, path: &Path) -> Result<()> {
     let metadata = crate::grok::metadata(path);
     transaction.execute(
@@ -1356,6 +1415,115 @@ mod tests {
         ProcessBody, ScanStatus,
     };
     use crate::{SessionEvent, SessionSource};
+
+    #[test]
+    fn cached_guardian_metadata_is_reclassified_without_rebuilding_offsets() -> Result<()> {
+        let directory = tempdir()?;
+        let path = directory.path().join("guardian.jsonl");
+        let source = format!(
+            "{}\n{}\n",
+            json!({"type":"session_meta","payload":{"id":"guardian","source":{"subagent":{"other":"guardian"}},"cwd":"/project"}}),
+            codex_user("Review this command", "2026-10-29T00:00:00Z")
+        );
+        fs::write(&path, &source)?;
+        let mut index = IndexDatabase::open_in_memory()?;
+        let initial = index.scan_file(
+            SessionSource::Codex,
+            &path,
+            &CancellationToken::default(),
+            |_| {},
+        )?;
+        assert!(initial.file.is_sidechain);
+        let offsets = index.conversation_lines(initial.file.id)?;
+        index
+            .connection
+            .execute("UPDATE files SET is_sidechain = 0", [])?;
+        index.refresh_codex_relationships(&CancellationToken::default())?;
+        assert!(index.list_files(SessionSource::Codex)?[0].is_sidechain);
+        index
+            .connection
+            .execute("UPDATE files SET is_sidechain = 0", [])?;
+        let unchanged = index.scan_file(
+            SessionSource::Codex,
+            &path,
+            &CancellationToken::default(),
+            |_| {},
+        )?;
+        assert_eq!(unchanged.status, ScanStatus::Unchanged);
+        assert_eq!(unchanged.file.id, initial.file.id);
+        assert!(unchanged.file.is_sidechain);
+        assert_eq!(index.conversation_lines(initial.file.id)?, offsets);
+        assert_eq!(fs::read_to_string(path)?, source);
+        Ok(())
+    }
+
+    #[test]
+    fn codex_relationship_refresh_rolls_back_failures_and_retains_unreadable_metadata() -> Result<()>
+    {
+        let directory = tempdir()?;
+        let mut index = IndexDatabase::open_in_memory()?;
+        let mut files = Vec::new();
+        for name in ["a", "b"] {
+            let path = directory.path().join(format!("{name}.jsonl"));
+            fs::write(
+                &path,
+                format!(
+                    "{}\n",
+                    json!({"type":"session_meta","payload":{"id":name,"source":{"subagent":{"other":"guardian"}}}})
+                ),
+            )?;
+            files.push(
+                index
+                    .scan_file(
+                        SessionSource::Codex,
+                        path,
+                        &CancellationToken::default(),
+                        |_| {},
+                    )?
+                    .file,
+            );
+        }
+        index
+            .connection
+            .execute("UPDATE files SET is_sidechain = 0", [])?;
+        let reject_id = index.list_files(SessionSource::Codex)?.last().unwrap().id;
+        index.connection.execute_batch(&format!("CREATE TRIGGER reject_relationship BEFORE UPDATE ON files WHEN NEW.id = {reject_id} BEGIN SELECT RAISE(FAIL, 'injected failure'); END;"))?;
+        assert!(index
+            .refresh_codex_relationships(&CancellationToken::default())
+            .is_err());
+        assert!(index
+            .list_files(SessionSource::Codex)?
+            .iter()
+            .all(|file| !file.is_sidechain));
+        index
+            .connection
+            .execute_batch("DROP TRIGGER reject_relationship")?;
+        let cancelled = CancellationToken::default();
+        cancelled.cancel();
+        assert!(index.refresh_codex_relationships(&cancelled).is_err());
+        assert!(index
+            .list_files(SessionSource::Codex)?
+            .iter()
+            .all(|file| !file.is_sidechain));
+        fs::remove_file(&files[0].path)?;
+        index.refresh_codex_relationships(&CancellationToken::default())?;
+        let refreshed = index.list_files(SessionSource::Codex)?;
+        assert!(
+            !refreshed
+                .iter()
+                .find(|file| file.id == files[0].id)
+                .unwrap()
+                .is_sidechain
+        );
+        assert!(
+            refreshed
+                .iter()
+                .find(|file| file.id == files[1].id)
+                .unwrap()
+                .is_sidechain
+        );
+        Ok(())
+    }
 
     #[test]
     fn codex_append_preserves_index_and_deduplicates_alternate_assistant_record() -> Result<()> {

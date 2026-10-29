@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs::File,
-    io::{BufRead, BufReader},
+    io::{self, BufRead, BufReader, Read as _},
     path::{Path, PathBuf},
 };
 
@@ -14,6 +14,44 @@ use super::util::*;
 
 const LIST_LIMIT: usize = 1000;
 const RESULT_TRUNCATE_CHARS: usize = 24_000;
+const SESSION_META_LIMIT: u64 = 512 * 1024;
+
+/// Codex serializes all auxiliary sessions under `source.subagent`, including
+/// `{"other":"guardian"}` and string variants, not just spawned agent threads.
+pub(crate) fn session_relationship(payload: &Value) -> (bool, Option<String>) {
+    let subagent = payload.pointer("/source/subagent");
+    let is_sidechain = matches!(subagent, Some(Value::String(_) | Value::Object(_)));
+    let parent = payload
+        .pointer("/source/subagent/thread_spawn/parent_thread_id")
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("forked_from_id").and_then(Value::as_str))
+        .map(ToOwned::to_owned);
+    (is_sidechain, parent)
+}
+
+/// Read only the bounded first metadata record when refreshing a cached session.
+/// Pending, oversized, or non-metadata records retain the previous cache flags.
+pub(crate) fn read_session_meta(path: &Path) -> io::Result<Option<Value>> {
+    let file = File::open(path)?;
+    let mut line = Vec::new();
+    BufReader::new(file)
+        .take(SESSION_META_LIMIT + 1)
+        .read_until(b'\n', &mut line)?;
+    if line.len() as u64 > SESSION_META_LIMIT || !line.ends_with(b"\n") {
+        return Ok(None);
+    }
+    let value: Value = match serde_json::from_slice(&line) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    if value.get("type").and_then(Value::as_str) != Some("session_meta") {
+        return Ok(None);
+    }
+    Ok(value
+        .get("payload")
+        .filter(|payload| payload.is_object())
+        .cloned())
+}
 
 #[derive(Debug, Default, Clone)]
 struct IndexEntry {
@@ -703,15 +741,9 @@ fn apply_session_meta(
         *current_model = Some(model.to_string());
         summary.model = Some(model.to_string());
     }
-    if let Some(parent) = payload
-        .pointer("/source/subagent/thread_spawn/parent_thread_id")
-        .and_then(Value::as_str)
-    {
-        summary.parent_session_id = Some(parent.to_string());
-        summary.is_sidechain = true;
-    } else if let Some(forked) = payload.get("forked_from_id").and_then(Value::as_str) {
-        summary.parent_session_id = Some(forked.to_string());
-    }
+    let (is_sidechain, parent) = session_relationship(payload);
+    summary.is_sidechain = is_sidechain;
+    summary.parent_session_id = parent;
 }
 
 fn extract_assistant_record(value: &Value) -> Option<AssistantRecord> {
@@ -928,6 +960,30 @@ mod tests {
     use serde_json::json;
 
     use super::extract_assistant_record;
+
+    #[test]
+    fn auxiliary_session_metadata_includes_guardian_and_preserves_user_forks() {
+        for source in [
+            json!({"subagent":{"other":"guardian"}}),
+            json!({"subagent":"review"}),
+            json!({"subagent":{"thread_spawn":{"parent_thread_id":"parent"}}}),
+        ] {
+            let payload = json!({"source":source});
+            let mut summary = super::SessionSummary::empty(
+                "test".into(),
+                super::SessionSource::Codex,
+                "test.jsonl".into(),
+            );
+            super::apply_session_meta(&payload, &mut summary, &mut None, &mut None);
+            assert!(summary.is_sidechain);
+        }
+        let payload =
+            json!({"source":"vscode", "forked_from_id":"user-parent", "title":"guardian review"});
+        assert_eq!(
+            super::session_relationship(&payload),
+            (false, Some("user-parent".into()))
+        );
+    }
 
     #[test]
     fn assistant_record_deduplicates_adjacent_alternate_sources() {

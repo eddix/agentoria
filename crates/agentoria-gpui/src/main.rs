@@ -9,6 +9,7 @@ mod session_view;
 mod skill_catalog;
 mod skills_view;
 mod themes;
+mod workdir_filter;
 mod workspace;
 
 extern crate gpui_kit as gpui;

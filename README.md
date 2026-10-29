@@ -3,6 +3,8 @@
 Agentoria is a read-only macOS app for browsing local coding-agent sessions, Skills, hooks, and MCP configuration.
 
 - Browse Claude Code, Codex, and Grok Build conversations by recency or workspace. Long transcripts are indexed incrementally and rendered lazily.
+- Filter Sessions by work directory with the embedded Rust `nucleo-matcher` engine. Type abbreviations or multiple terms; `^prefix`, `suffix$`, `'exact`, and `!exclude` are supported, as is `~/`. Matching uses smart case and Unicode normalization. Grouped orders matching directories by score, with sessions newest first inside each group; Recent keeps chronological order. Escape in the filter clears it. The query stays when switching source or view mode and does not search transcript text or session titles.
+- The existing **Hidden / Shown** control includes Codex auxiliary sessions such as guardian reviews. Cached classifications are refreshed before displaying the list without rebuilding transcript offsets or changing source files.
 - Find USER/ASSISTANT message text with `⌘F` or the transcript's **Find** button. Matching ignores case and searches the Markdown source. Use `Enter` / `Shift+Enter` or `⌘G` / `⌘⇧G` to cycle through matches, and `Esc` to close. The search bar reports skipped large or unreadable records and any result limit.
 - Browse local Skills for Claude Code, Codex, Grok Build, Kimi, ZCode, and Trae. Open Markdown, images, and source files from a collapsible file tree; scripts use a highlighted, read-only code editor.
 - Follow links between files inside a Skill. Paths and symlinks cannot navigate outside its directory.

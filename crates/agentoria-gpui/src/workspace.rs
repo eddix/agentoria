@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -16,6 +16,7 @@ use gpui::{
 use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
+    input::{Input, InputEvent, InputState},
     menu::{DropdownMenu as _, PopupMenuItem},
     progress::Progress,
     resizable::{h_resizable, resizable_panel, ResizableState},
@@ -33,6 +34,7 @@ use crate::{
     skill_catalog::SkillAgent,
     skills_view::SkillsView,
     themes,
+    workdir_filter::WorkdirFilter,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -58,6 +60,11 @@ pub struct WorkspaceView {
     source: SessionSource,
     sessions: Vec<IndexedFile>,
     session_items: Vec<SessionListItem>,
+    filtered_session_count: usize,
+    workdir_filter: WorkdirFilter,
+    workdir_input: Option<Entity<InputState>>,
+    workdir_subscription: Option<Subscription>,
+    workdir_task: Option<Task<()>>,
     session_list_state: ListState,
     selected_file_id: Option<i64>,
     active_session: Option<Entity<SessionView>>,
@@ -101,6 +108,11 @@ impl WorkspaceView {
             source,
             sessions: Vec::new(),
             session_items: Vec::new(),
+            filtered_session_count: 0,
+            workdir_filter: WorkdirFilter::default(),
+            workdir_input: None,
+            workdir_subscription: None,
+            workdir_task: None,
             session_list_state: ListState::new(0, ListAlignment::Top, px(500.))
                 .with_uniform_item_height(px(86.)),
             selected_file_id: None,
@@ -131,6 +143,56 @@ impl WorkspaceView {
         }
     }
 
+    fn ensure_workdir_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.workdir_input.is_some() {
+            return;
+        }
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter work dir (fuzzy)"));
+        self.workdir_subscription =
+            Some(cx.subscribe(&input, |view, input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    view.set_workdir_query(input.read(cx).value().to_string(), cx);
+                }
+            }));
+        self.workdir_input = Some(input);
+    }
+
+    fn set_workdir_query(&mut self, query: String, cx: &mut Context<Self>) {
+        if !self.workdir_filter.set_query(query) {
+            return;
+        }
+        self.workdir_task = None;
+        self.schedule_workdir_matching(cx);
+        self.rebuild_session_items();
+        cx.notify();
+    }
+
+    fn schedule_workdir_matching(&mut self, cx: &mut Context<Self>) {
+        let directories = self
+            .sessions
+            .iter()
+            .filter_map(|file| file.working_dir.as_ref())
+            .filter(|directory| !directory.is_empty())
+            .cloned()
+            .collect();
+        let Some(request) = self.workdir_filter.prepare(directories) else {
+            return;
+        };
+        let home = dirs::home_dir();
+        let result = cx.background_spawn(async move { request.run(home.as_deref()) });
+        self.workdir_task = Some(cx.spawn(async move |weak, cx| {
+            let Some(result) = result.await else {
+                return;
+            };
+            let _ = weak.update(cx, |view, cx| {
+                if view.workdir_filter.apply(result) {
+                    view.rebuild_session_items();
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
     fn load_source(&mut self, source: SessionSource, cx: &mut Context<Self>) {
         self.cancellation.cancel();
         self.cancellation = CancellationToken::default();
@@ -140,6 +202,9 @@ impl WorkspaceView {
         self.preferences.set_source(source);
         self.schedule_preferences_save(cx);
         self.sessions.clear();
+        self.workdir_filter.reset();
+        self.workdir_task = None;
+        self.filtered_session_count = 0;
         self.session_items.clear();
         self.session_list_state.reset(0);
         self.selected_file_id = None;
@@ -190,6 +255,10 @@ impl WorkspaceView {
     }
 
     fn apply_source_event(&mut self, event: SourceLoadEvent, cx: &mut Context<Self>) {
+        let directories_changed = matches!(
+            &event,
+            SourceLoadEvent::Cached(_) | SourceLoadEvent::Indexed(_) | SourceLoadEvent::Removed(_)
+        );
         match event {
             SourceLoadEvent::Cached(files) => {
                 self.sessions = files;
@@ -270,6 +339,9 @@ impl WorkspaceView {
                 self.status_text = format!("Index failed · {message}");
             }
         }
+        if directories_changed {
+            self.schedule_workdir_matching(cx);
+        }
     }
 
     fn upsert_session(&mut self, file: IndexedFile) {
@@ -300,7 +372,9 @@ impl WorkspaceView {
             .sessions
             .iter()
             .filter(|file| !self.preferences.hide_subagents || !file.is_sidechain)
+            .filter(|file| self.workdir_filter.includes(file.working_dir.as_deref()))
             .collect::<Vec<_>>();
+        self.filtered_session_count = visible.len();
         self.session_items = match self.preferences.view_mode {
             ViewMode::Recent => visible
                 .into_iter()
@@ -308,15 +382,21 @@ impl WorkspaceView {
                 .collect(),
             ViewMode::Grouped => {
                 let mut groups: Vec<(String, String, Vec<i64>)> = Vec::new();
+                let mut positions = HashMap::new();
                 for file in visible {
                     let key = workspace_group_key(file);
-                    if let Some((_, _, files)) =
-                        groups.iter_mut().find(|(existing, _, _)| *existing == key)
-                    {
-                        files.push(file.id);
-                    } else {
-                        groups.push((key.clone(), workspace_group_label(file), vec![file.id]));
-                    }
+                    let index = *positions.entry(key.clone()).or_insert_with(|| {
+                        groups.push((key, workspace_group_label(file), Vec::new()));
+                        groups.len() - 1
+                    });
+                    groups[index].2.push(file.id);
+                }
+                if !self.workdir_filter.query.trim().is_empty() {
+                    groups.sort_by(|left, right| {
+                        self.workdir_filter
+                            .score(&right.0)
+                            .cmp(&self.workdir_filter.score(&left.0))
+                    });
                 }
                 groups
                     .into_iter()
@@ -338,10 +418,7 @@ impl WorkspaceView {
     }
 
     fn visible_session_count(&self) -> usize {
-        self.sessions
-            .iter()
-            .filter(|file| !self.preferences.hide_subagents || !file.is_sidechain)
-            .count()
+        self.filtered_session_count
     }
 
     fn set_view_mode(&mut self, mode: ViewMode, cx: &mut Context<Self>) {
@@ -912,13 +989,30 @@ impl WorkspaceView {
                                     .outline()
                                     .icon(IconName::EyeOff)
                                     .label(if hide_subagents { "Hidden" } else { "Shown" })
-                                    .tooltip("Show or hide subagent sessions")
+                                    .tooltip("Show or hide auxiliary sessions, including Codex guardian reviews")
                                     .on_click(
                                         cx.listener(|view, _, _, cx| view.toggle_subagents(cx)),
                                     ),
                             ),
                     ),
             )
+            .when_some(self.workdir_input.as_ref(), |this, input| {
+                this.child(h_flex().flex_shrink_0().px_4().py_3().border_b_1().border_color(cx.theme().sidebar_border)
+                    .capture_action(cx.listener(|view, _: &gpui_kit::component::input::Escape, window, cx| {
+                        if !view.workdir_filter.query.is_empty() {
+                            if let Some(input) = &view.workdir_input {
+                                input.update(cx, |input, cx| input.set_value("", window, cx));
+                            }
+                            view.set_workdir_query(String::new(), cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .child(Input::new(input).id("workdir-filter").aria_label("Filter work directories").cleanable(true).w_full()))
+            })
+            .when(self.workdir_filter.matching || (count == 0 && !self.workdir_filter.query.trim().is_empty()), |this| {
+                this.child(div().px_4().py_3().text_xs().text_color(cx.theme().muted_foreground)
+                    .child(if self.workdir_filter.matching { "Matching work directories…" } else { "No matching work directories" }))
+            })
             .child(
                 list(
                     self.session_list_state.clone(),
@@ -1134,7 +1228,10 @@ impl WorkspaceView {
 }
 
 impl Render for WorkspaceView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.mode == ContentMode::Sessions {
+            self.ensure_workdir_input(window, cx);
+        }
         let content: AnyElement = if self.mode == ContentMode::Skills {
             self.skills_view
                 .as_ref()
@@ -1278,8 +1375,111 @@ fn short_timestamp(timestamp: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::TestAppContext;
-    use std::fs;
+    use gpui::{TestAppContext, VisualTestContext};
+    use std::{cell::RefCell, fs, rc::Rc};
+
+    #[gpui::test]
+    fn workdir_input_filters_groups_without_changing_recency_selection_or_collapse_state(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let directory = tempfile::tempdir().unwrap();
+        let mut index = IndexDatabase::open_in_memory().unwrap();
+        let mut files = Vec::new();
+        for (ordinal, cwd) in [
+            Some("/work/agentoria"),
+            Some("/work/another-project"),
+            Some("/work/agent-origami"),
+            None,
+            Some("/work/agentoria"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let path = directory.path().join(format!("{ordinal}.jsonl"));
+            let source = if ordinal == 4 {
+                serde_json::json!({"subagent":{"other":"guardian"}})
+            } else {
+                serde_json::json!("vscode")
+            };
+            fs::write(&path, format!("{}\n", serde_json::json!({"type":"session_meta", "payload":{"id":ordinal.to_string(), "cwd":cwd, "source":source}}))).unwrap();
+            let mut file = index
+                .scan_file(
+                    SessionSource::Codex,
+                    path,
+                    &CancellationToken::default(),
+                    |_| {},
+                )
+                .unwrap()
+                .file;
+            file.updated_at = format!("2026-10-29T00:00:{ordinal:02}Z");
+            file.title = Some("agentoria".into());
+            files.push(file);
+        }
+        let selected = files[0].id;
+        let newer = files[2].id;
+        let slot = Rc::new(RefCell::new(None::<Entity<WorkspaceView>>));
+        let target = slot.clone();
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                let mut view = WorkspaceView::empty(
+                    Preferences {
+                        view_mode: ViewMode::Grouped,
+                        ..Preferences::default()
+                    },
+                    cx,
+                );
+                view.sessions = files;
+                view.selected_file_id = Some(selected);
+                view.sort_sessions();
+                view.rebuild_session_items();
+                view
+            });
+            *target.borrow_mut() = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+        let view = slot.borrow().as_ref().unwrap().clone();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            view.read_with(cx, |view, _| view.visible_session_count()),
+            4
+        );
+        view.update_in(cx, |view, window, cx| {
+            view.workdir_input
+                .as_ref()
+                .unwrap()
+                .update(cx, |input, cx| input.focus(window, cx));
+        });
+        cx.simulate_input("agentoria");
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.workdir_filter.query, "agentoria");
+            assert_eq!(view.visible_session_count(), 2);
+            assert_eq!(view.selected_file_id, Some(selected));
+            assert!(matches!(view.session_items.first(), Some(SessionListItem::Group { key, count: 1, .. }) if key == "/work/agentoria"));
+        });
+        view.update(cx, |view, _| {
+            view.preferences.view_mode = ViewMode::Recent;
+            view.rebuild_session_items();
+            assert!(matches!(view.session_items[0], SessionListItem::Session(id) if id == newer));
+            view.preferences.hide_subagents = false;
+            view.preferences.view_mode = ViewMode::Grouped;
+            view.collapsed_groups.insert("/work/agentoria".into());
+            view.rebuild_session_items();
+            assert_eq!(view.visible_session_count(), 3);
+        });
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert!(view.workdir_filter.query.is_empty());
+            assert_eq!(view.visible_session_count(), 5);
+            assert!(view.collapsed_groups.contains("/work/agentoria"));
+            assert_eq!(view.selected_file_id, Some(selected));
+        });
+    }
 
     #[gpui::test]
     fn removed_session_updates_groups_and_cancels_the_open_or_loading_view(

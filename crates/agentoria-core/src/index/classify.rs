@@ -195,14 +195,9 @@ fn classify_codex(value: &Value) -> LineDescriptor {
             descriptor.session_id = string_field(payload, "id");
             descriptor.working_dir = string_field(payload, "cwd");
             descriptor.model = string_field(payload, "model");
-            descriptor.parent_session_id = payload
-                .pointer("/source/subagent/thread_spawn/parent_thread_id")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-                .or_else(|| string_field(payload, "forked_from_id"));
-            descriptor.is_sidechain = payload
-                .pointer("/source/subagent/thread_spawn/parent_thread_id")
-                .is_some();
+            let (is_sidechain, parent) = crate::codex::session_relationship(payload);
+            descriptor.parent_session_id = parent;
+            descriptor.is_sidechain = is_sidechain;
         }
     } else if top_type == "turn_context" {
         if let Some(payload) = payload {

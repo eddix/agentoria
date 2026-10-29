@@ -120,6 +120,9 @@ pub fn run_source_load(
 ) -> Result<()> {
     let mut database = IndexDatabase::open(index_path)?;
     reconcile_missing_sessions(source, &mut database, cancellation, sender)?;
+    if source == SessionSource::Codex {
+        database.refresh_codex_relationships(cancellation)?;
+    }
     sender
         .send_blocking(SourceLoadEvent::Cached(database.list_files(source)?))
         .ok();
