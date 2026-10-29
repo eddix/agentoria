@@ -1,3 +1,5 @@
+mod config_catalog;
+mod config_view;
 mod indexer;
 mod preferences;
 mod process_view;

@@ -25,6 +25,8 @@ use gpui_kit::component::{
 };
 
 use crate::{
+    config_catalog::{ConfigAgent, ConfigKind},
+    config_view::ConfigView,
     indexer::{index_path, run_source_load, SourceLoadEvent},
     preferences::{Preferences, ViewMode},
     session_view::SessionView,
@@ -37,6 +39,8 @@ use crate::{
 enum ContentMode {
     Sessions,
     Skills,
+    Hooks,
+    Mcp,
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +63,9 @@ pub struct WorkspaceView {
     active_session: Option<Entity<SessionView>>,
     skills_view: Option<Entity<SkillsView>>,
     skills_subscription: Option<Subscription>,
+    hooks_view: Option<Entity<ConfigView>>,
+    mcp_view: Option<Entity<ConfigView>>,
+    config_subscriptions: Vec<Subscription>,
     source_loading: bool,
     session_loading: bool,
     discovered_files: usize,
@@ -100,6 +107,9 @@ impl WorkspaceView {
             active_session: None,
             skills_view: None,
             skills_subscription: None,
+            hooks_view: None,
+            mcp_view: None,
+            config_subscriptions: Vec::new(),
             source_loading: false,
             session_loading: false,
             discovered_files: 0,
@@ -405,7 +415,56 @@ impl WorkspaceView {
             self.skills_subscription = Some(cx.observe(&skills, |_, _, cx| cx.notify()));
             self.skills_view = Some(skills);
         }
+        if matches!(mode, ContentMode::Hooks | ContentMode::Mcp) {
+            let project = self
+                .selected_file_id
+                .and_then(|id| self.sessions.iter().find(|file| file.id == id))
+                .and_then(|file| file.working_dir.as_ref())
+                .map(PathBuf::from)
+                .filter(|path| path.is_dir());
+            if let Some(view) = self.config_view().cloned() {
+                view.update(cx, |view, cx| view.set_project(project, window, cx));
+            } else {
+                let agent = match self.source {
+                    SessionSource::Claude => ConfigAgent::Claude,
+                    SessionSource::Codex => ConfigAgent::Codex,
+                    SessionSource::Grok => ConfigAgent::Grok,
+                };
+                let kind = if mode == ContentMode::Hooks {
+                    ConfigKind::Hooks
+                } else {
+                    ConfigKind::Mcp
+                };
+                let view = cx.new(|cx| ConfigView::new(kind, agent, project, window, cx));
+                self.config_subscriptions
+                    .push(cx.observe(&view, |_, _, cx| cx.notify()));
+                if mode == ContentMode::Hooks {
+                    self.hooks_view = Some(view);
+                } else {
+                    self.mcp_view = Some(view);
+                }
+            }
+        }
         cx.notify();
+    }
+
+    fn config_view(&self) -> Option<&Entity<ConfigView>> {
+        match self.mode {
+            ContentMode::Hooks => self.hooks_view.as_ref(),
+            ContentMode::Mcp => self.mcp_view.as_ref(),
+            _ => None,
+        }
+    }
+
+    fn set_config_agent(
+        &mut self,
+        agent: ConfigAgent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(view) = self.config_view().cloned() {
+            view.update(cx, |view, cx| view.set_agent(agent, window, cx));
+        }
     }
 
     fn set_skill_agent(&mut self, agent: SkillAgent, window: &mut Window, cx: &mut Context<Self>) {
@@ -426,6 +485,27 @@ impl WorkspaceView {
                     view.handle_search_key_down(event, window, cx)
                 })
             }) {
+                window.prevent_default();
+                cx.stop_propagation();
+            }
+            return;
+        }
+        if let Some(config) = self.config_view().cloned() {
+            let modifiers = event.keystroke.modifiers;
+            let handled = if modifiers.platform
+                && !modifiers.control
+                && !modifiers.alt
+                && !modifiers.shift
+                && event.keystroke.key.eq_ignore_ascii_case("f")
+            {
+                config.update(cx, |view, cx| view.focus_search(window, cx));
+                true
+            } else if !modifiers.modified() && event.keystroke.key.eq_ignore_ascii_case("escape") {
+                config.update(cx, |view, cx| view.clear_search(window, cx))
+            } else {
+                false
+            };
+            if handled {
                 window.prevent_default();
                 cx.stop_propagation();
             }
@@ -581,7 +661,7 @@ impl WorkspaceView {
                         )
                 })
                 .into_any_element()
-        } else {
+        } else if self.mode == ContentMode::Skills {
             Button::new("skill-agent-menu")
                 .small()
                 .outline()
@@ -597,6 +677,34 @@ impl WorkspaceView {
                                 .on_click(move |_, window, cx| {
                                     let _ = weak.update(cx, |view, cx| {
                                         view.set_skill_agent(agent, window, cx)
+                                    });
+                                }),
+                        );
+                    }
+                    menu
+                })
+                .into_any_element()
+        } else {
+            let config_agent = self
+                .config_view()
+                .map(|view| view.read(cx).agent())
+                .unwrap_or(ConfigAgent::Codex);
+            let weak = cx.weak_entity();
+            Button::new("config-agent-menu")
+                .small()
+                .outline()
+                .label(config_agent.label())
+                .dropdown_caret(true)
+                .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                    let mut menu = menu.label("Configuration Agent");
+                    for agent in ConfigAgent::ALL {
+                        let weak = weak.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new(agent.label())
+                                .checked(agent == config_agent)
+                                .on_click(move |_, window, cx| {
+                                    let _ = weak.update(cx, |view, cx| {
+                                        view.set_config_agent(agent, window, cx)
                                     });
                                 }),
                         );
@@ -637,17 +745,23 @@ impl WorkspaceView {
                                 .selected_index(match self.mode {
                                     ContentMode::Sessions => 0,
                                     ContentMode::Skills => 1,
+                                    ContentMode::Hooks => 2,
+                                    ContentMode::Mcp => 3,
                                 })
                                 .on_click(cx.listener(|view, index: &usize, window, cx| {
                                     let mode = match index {
                                         0 => ContentMode::Sessions,
                                         1 => ContentMode::Skills,
+                                        2 => ContentMode::Hooks,
+                                        3 => ContentMode::Mcp,
                                         _ => return,
                                     };
                                     view.set_mode(mode, window, cx);
                                 }))
                                 .child("Sessions")
-                                .child("Skills"),
+                                .child("Skills")
+                                .child("Hooks")
+                                .child("MCP"),
                         )
                         .child(source_button)
                         .child(
@@ -962,6 +1076,14 @@ impl WorkspaceView {
             } else {
                 ("Opening skills".to_string(), "Skills".to_string(), false)
             }
+        } else if let Some(config) = self.config_view() {
+            let config = config.read(cx);
+            let (status, count) = config.status();
+            (
+                status,
+                format!("{} · {} definitions", config.agent().label(), count),
+                false,
+            )
         } else {
             (
                 self.status_text.clone(),
@@ -1018,6 +1140,8 @@ impl Render for WorkspaceView {
                 .as_ref()
                 .map(|skills| skills.clone().into_any_element())
                 .unwrap_or_else(|| div().into_any_element())
+        } else if let Some(config) = self.config_view() {
+            config.clone().into_any_element()
         } else {
             h_resizable("workspace-split")
                 .with_state(&self.resizable_state)
