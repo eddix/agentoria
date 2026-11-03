@@ -37,6 +37,7 @@ const MAX_LOAD_BATCH: usize = 16;
 const PREFETCH_ROWS: usize = 6;
 type ScrollCallback = dyn Fn(ScrollAnchor, &mut Window, &mut App);
 
+#[derive(PartialEq, Eq)]
 enum CachedBody {
     Loaded(SharedString),
     Oversized { source_bytes: u64 },
@@ -72,6 +73,7 @@ pub struct SessionView {
     list_state: ListState,
     bodies: HashMap<usize, CachedBody>,
     loading: HashSet<usize>,
+    stale_bodies: HashSet<usize>,
     load_task: Option<Task<()>>,
     cache_order: VecDeque<usize>,
     cached_text_bytes: usize,
@@ -142,6 +144,7 @@ impl SessionView {
             list_state,
             bodies: HashMap::new(),
             loading: HashSet::new(),
+            stale_bodies: HashSet::new(),
             load_task: None,
             cache_order: VecDeque::new(),
             cached_text_bytes: 0,
@@ -154,6 +157,132 @@ impl SessionView {
         };
         view.load_visible_bodies(cx);
         view
+    }
+
+    pub fn update_snapshot(
+        &mut self,
+        file: IndexedFile,
+        conversations: Vec<IndexedLine>,
+        process: Vec<IndexedLine>,
+        cx: &mut Context<Self>,
+    ) {
+        let conversations_changed = self.conversation_lines.as_ref() != conversations;
+        let process_changed = self.process_lines.as_ref() != process;
+        let text_may_have_changed = conversations_changed
+            || self.file.updated_at != file.updated_at
+            // JSONL index notifications can reflect an in-place rewrite with
+            // unchanged offsets/timestamps; keep rereading their visible text.
+            || file.source != agentoria_core::SessionSource::TraeCn;
+        self.file = file;
+        if !text_may_have_changed && !process_changed {
+            // A database/WAL notification can belong to any other session.
+            // Keep loaded bodies, search, and measured layout untouched.
+            cx.notify();
+            return;
+        }
+
+        let top = self.list_state.logical_scroll_top();
+        let following = self.list_state.is_following_tail();
+        let old_process_row = usize::from(!self.process_lines.is_empty());
+        let process_row = usize::from(!process.is_empty());
+        let positions = conversations
+            .iter()
+            .enumerate()
+            .map(|(index, line)| ((line.byte_offset, line.event_type.as_str()), index))
+            .collect::<HashMap<_, _>>();
+        let new_position = |old: &IndexedLine| {
+            positions
+                .get(&(old.byte_offset, old.event_type.as_str()))
+                .copied()
+        };
+        let anchor = if old_process_row == 1 && top.item_ix == 0 {
+            (process_row == 1).then_some(0)
+        } else {
+            top.item_ix
+                .checked_sub(old_process_row)
+                .and_then(|index| self.conversation_lines.get(index))
+                .and_then(new_position)
+                .map(|index| index + process_row)
+        };
+
+        if text_may_have_changed {
+            // Cancel the old batch before remapping its indices. Existing text
+            // stays visible while replacement bodies load in bounded batches.
+            self.load_task = None;
+            self.loading.clear();
+            self.stale_bodies.clear();
+            let previous = std::mem::take(&mut self.bodies);
+            self.cache_order = self
+                .cache_order
+                .drain(..)
+                .filter_map(|index| self.conversation_lines.get(index).and_then(new_position))
+                .collect();
+            self.cached_text_bytes = 0;
+            for (index, body) in previous {
+                if let Some(index) = self.conversation_lines.get(index).and_then(new_position) {
+                    self.cached_text_bytes += body.text_bytes();
+                    self.bodies.insert(index, body);
+                    self.stale_bodies.insert(index);
+                }
+            }
+        }
+
+        let prefix = self
+            .conversation_lines
+            .iter()
+            .zip(&conversations)
+            .take_while(|(old, new)| same_record(old, new))
+            .count();
+        let suffix = self.conversation_lines[prefix..]
+            .iter()
+            .rev()
+            .zip(conversations[prefix..].iter().rev())
+            .take_while(|(old, new)| same_record(old, new))
+            .count();
+        let old_end = self.conversation_lines.len() - suffix;
+        let new_end = conversations.len() - suffix;
+        if old_process_row != process_row {
+            self.list_state.splice(0..old_process_row, process_row);
+        }
+        if prefix != old_end || prefix != new_end {
+            self.list_state.splice(
+                process_row + prefix..process_row + old_end,
+                new_end - prefix,
+            );
+        }
+        for (index, line) in conversations.iter().enumerate() {
+            // Changed row metadata may affect its timestamp or height; body
+            // completion separately remeasures only text that actually changed.
+            if !self
+                .conversation_lines
+                .get(index)
+                .is_some_and(|old| old == line)
+            {
+                self.list_state
+                    .remeasure_items(index + process_row..index + process_row + 1);
+            }
+        }
+        self.conversation_lines = conversations.into();
+        self.process_lines = process.into();
+        if process_changed && process_row == 1 {
+            self.list_state.remeasure_items(0..1);
+        }
+        if following {
+            self.list_state.set_follow_mode(FollowMode::Tail);
+        } else if let Some(item_ix) = anchor {
+            self.list_state.scroll_to(ListOffset { item_ix, ..top });
+        }
+        let count = self.conversation_lines.len() + process_row;
+        let start = anchor.unwrap_or(top.item_ix).min(count.saturating_sub(1));
+        let visible_count = self.visible_range.len().max(1);
+        self.visible_range = start..(start + visible_count).min(count);
+        self.rendered_range = None;
+        self.evict_cache();
+        if text_may_have_changed {
+            self.start_search(self.search.query.clone(), true, cx);
+            self.load_visible_bodies(cx);
+        }
+        cx.notify();
     }
 
     fn load_visible_bodies(&mut self, cx: &mut Context<Self>) {
@@ -181,7 +310,7 @@ impl SessionView {
         let pending = (visible_start..visible_end)
             .chain(range.start..visible_start)
             .chain(visible_end..range.end)
-            .filter(|index| !self.bodies.contains_key(index))
+            .filter(|index| !self.bodies.contains_key(index) || self.stale_bodies.contains(index))
             .take(MAX_LOAD_BATCH)
             .map(|index| (index, self.conversation_lines[index].clone()))
             .collect::<Vec<_>>();
@@ -208,8 +337,12 @@ impl SessionView {
                 let wanted = view.prefetch_range();
                 for (index, body) in loaded {
                     if wanted.contains(&index) {
+                        let text_changed = view.bodies.get(&index) != Some(&body);
                         view.insert_body(index, body);
-                        changed.push(index);
+                        view.stale_bodies.remove(&index);
+                        if text_changed {
+                            changed.push(index);
+                        }
                     }
                 }
                 view.evict_cache();
@@ -254,6 +387,7 @@ impl SessionView {
     }
 
     fn retry_body(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.stale_bodies.remove(&index);
         if let Some(body) = self.bodies.remove(&index) {
             self.cached_text_bytes -= body.text_bytes();
             self.cache_order.retain(|cached| *cached != index);
@@ -283,6 +417,7 @@ impl SessionView {
             }
             if let Some(body) = self.bodies.remove(&index) {
                 self.cached_text_bytes -= body.text_bytes();
+                self.stale_bodies.remove(&index);
             }
         }
     }
@@ -371,6 +506,11 @@ impl SessionView {
         if query == self.search.query {
             return;
         }
+        self.start_search(query, false, cx);
+    }
+
+    fn start_search(&mut self, query: String, preserve_position: bool, cx: &mut Context<Self>) {
+        let previous_active = self.search.active.unwrap_or(0);
         self.search.reset(query);
         if self.search.searching {
             let revision = self.search.revision;
@@ -399,7 +539,13 @@ impl SessionView {
                     if let Some(results) = results {
                         view.search.results = results;
                         if !view.search.results.matches.is_empty() {
-                            view.select_search_match(0, cx);
+                            if preserve_position {
+                                view.search.active = Some(
+                                    previous_active.min(view.search.results.matches.len() - 1),
+                                );
+                            } else {
+                                view.select_search_match(0, cx);
+                            }
                         }
                     }
                     cx.notify();
@@ -962,6 +1108,10 @@ impl Render for SessionView {
     }
 }
 
+fn same_record(left: &IndexedLine, right: &IndexedLine) -> bool {
+    left.byte_offset == right.byte_offset && left.event_type == right.event_type
+}
+
 fn session_title(file: &IndexedFile) -> String {
     file.title
         .clone()
@@ -1021,6 +1171,141 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{CachedBody, SessionView, MAX_CACHED_BODIES, MAX_LOAD_BATCH};
+
+    #[gpui::test]
+    fn unchanged_and_process_only_snapshots_keep_cache_search_and_pixel_scroll(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let (_directory, lines) = search_fixture();
+        let mut file = test_file(lines.len());
+        file.source = SessionSource::TraeCn;
+        let view = cx.update(|cx| {
+            cx.new(|cx| {
+                SessionView::new(
+                    file.clone(),
+                    lines.clone(),
+                    Vec::new(),
+                    None,
+                    |_, _, _| {},
+                    cx,
+                )
+            })
+        });
+        wait_for_load(&view, cx);
+        view.update(cx, |view, cx| view.set_search_query("Rust".into(), cx));
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(250));
+        cx.run_until_parked();
+        view.update(cx, |view, cx| {
+            view.render_markdown = false;
+            view.search.open = true;
+            view.search.active = Some(1);
+            view.list_state.set_follow_mode(FollowMode::Normal);
+            view.list_state.scroll_to(ListOffset {
+                item_ix: 1,
+                offset_in_item: px(17.),
+            });
+            let revision = view.search.revision;
+            let bytes = view.cached_text_bytes;
+            let CachedBody::Loaded(text) = &view.bodies[&0] else {
+                panic!("fixture body missing")
+            };
+            let pointer = text.as_ptr();
+            // Another session can grow the shared database without changing
+            // any metadata or body references belonging to this conversation.
+            file.file_size += 4096;
+            view.update_snapshot(file.clone(), lines.clone(), Vec::new(), cx);
+            assert_eq!(view.list_state.logical_scroll_top().item_ix, 1);
+            let mut process = lines[0].clone();
+            process.conversation_kind = None;
+            process.event_type = "process".into();
+            view.update_snapshot(file.clone(), lines.clone(), vec![process], cx);
+            let top = view.list_state.logical_scroll_top();
+            assert_eq!(top.item_ix, 2);
+            assert_eq!(top.offset_in_item, px(17.));
+            assert_eq!(view.cached_text_bytes, bytes);
+            assert_eq!(view.bodies.len(), lines.len());
+            let CachedBody::Loaded(text) = &view.bodies[&0] else {
+                panic!("cached text disappeared")
+            };
+            assert_eq!(text.as_ptr(), pointer);
+            assert!(view.stale_bodies.is_empty() && view.loading.is_empty());
+            assert_eq!(view.search.revision, revision);
+            assert_eq!(view.search.query, "Rust");
+            assert_eq!(view.search.active, Some(1));
+            assert!(view.search.open && !view.render_markdown);
+        });
+    }
+
+    #[gpui::test]
+    fn changed_snapshot_keeps_old_text_until_reload_and_does_not_jump_to_search_match(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let (_directory, lines) = search_fixture();
+        let mut file = test_file(lines.len());
+        file.source = SessionSource::TraeCn;
+        let view = cx.update(|cx| {
+            cx.new(|cx| {
+                SessionView::new(
+                    file.clone(),
+                    lines.clone(),
+                    Vec::new(),
+                    None,
+                    |_, _, _| {},
+                    cx,
+                )
+            })
+        });
+        wait_for_load(&view, cx);
+        view.update(cx, |view, cx| view.set_search_query("Rust".into(), cx));
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(250));
+        cx.run_until_parked();
+        let original = fs::read_to_string(&lines[0].path).unwrap();
+        fs::write(
+            &lines[0].path,
+            original.replace("Rust", "Ruby").replace("RUST", "RUBY"),
+        )
+        .unwrap();
+        file.updated_at = "2026-11-04T00:00:00Z".into();
+        view.update(cx, |view, cx| {
+            view.search.open = true;
+            view.list_state.scroll_to(ListOffset {
+                item_ix: 1,
+                offset_in_item: px(19.),
+            });
+            view.update_snapshot(file.clone(), lines.clone(), Vec::new(), cx);
+            assert!(matches!(&view.bodies[&0], CachedBody::Loaded(text) if text.contains("Rust")));
+            assert!(view.stale_bodies.contains(&0));
+        });
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(250));
+        wait_for_load(&view, cx);
+        view.update(cx, |view, cx| {
+            assert!(matches!(&view.bodies[&0], CachedBody::Loaded(text) if text.contains("Ruby")));
+            assert_eq!(view.search.query, "Rust");
+            assert_eq!(view.search.results.total_matches, 1);
+            assert!(view.search.open);
+            let top = view.list_state.logical_scroll_top();
+            assert_eq!((top.item_ix, top.offset_in_item), (1, px(19.)));
+
+            let mut inserted = lines[2].clone();
+            inserted.byte_offset = 999_999;
+            let mut next = lines.clone();
+            next.insert(0, inserted);
+            view.update_snapshot(file.clone(), next, Vec::new(), cx);
+            let top = view.list_state.logical_scroll_top();
+            assert_eq!((top.item_ix, top.offset_in_item), (2, px(19.)));
+            assert!(matches!(&view.bodies[&1], CachedBody::Loaded(text) if text.contains("Ruby")));
+            assert!(view.bodies.len() <= MAX_CACHED_BODIES);
+            view.list_state.set_follow_mode(FollowMode::Tail);
+            view.update_snapshot(file.clone(), lines.clone(), Vec::new(), cx);
+            assert!(view.list_state.is_following_tail());
+        });
+        wait_for_load(&view, cx);
+    }
 
     #[gpui::test]
     fn session_view_starts_at_tail_and_toggles_markdown(cx: &mut TestAppContext) {
@@ -1481,6 +1766,7 @@ mod tests {
                     list_state,
                     bodies: HashMap::from([(0, CachedBody::Loaded(text.into()))]),
                     loading: HashSet::new(),
+                    stale_bodies: HashSet::new(),
                     load_task: None,
                     cache_order: VecDeque::new(),
                     cached_text_bytes: text.len(),
@@ -1550,6 +1836,7 @@ mod tests {
                     list_state,
                     bodies: HashMap::new(),
                     loading: HashSet::new(),
+                    stale_bodies: HashSet::new(),
                     load_task: None,
                     cache_order: VecDeque::new(),
                     cached_text_bytes: 0,

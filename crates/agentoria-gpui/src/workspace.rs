@@ -90,6 +90,7 @@ pub struct WorkspaceView {
     trae_key_subscription: Option<Subscription>,
     source_loading: bool,
     session_loading: bool,
+    session_refresh_pending: bool,
     discovered_files: usize,
     indexed_files: usize,
     current_file_progress: f32,
@@ -142,6 +143,7 @@ impl WorkspaceView {
             trae_key_subscription: None,
             source_loading: false,
             session_loading: false,
+            session_refresh_pending: false,
             discovered_files: 0,
             indexed_files: 0,
             current_file_progress: 0.,
@@ -232,6 +234,7 @@ impl WorkspaceView {
         self.active_session = None;
         self.source_loading = true;
         self.session_loading = false;
+        self.session_refresh_pending = false;
         self.discovered_files = 0;
         self.indexed_files = 0;
         self.current_file_progress = 0.;
@@ -299,13 +302,14 @@ impl WorkspaceView {
                             .iter()
                             .any(|file| file.id == id && file.session_id == previous_session_id)
                     {
-                        if self.active_session.is_some() && !self.session_loading {
-                            self.select_session(id, cx);
+                        if self.active_session.is_some() || self.session_loading {
+                            self.refresh_session(id, cx);
                         }
                     } else {
                         self.selected_file_id = None;
                         self.active_session = None;
                         self.session_loading = false;
+                        self.session_refresh_pending = false;
                         self.session_revision = self.session_revision.wrapping_add(1);
                         self.session_task = None;
                     }
@@ -314,6 +318,7 @@ impl WorkspaceView {
             SourceLoadEvent::TraeKeyRequired(message) => {
                 self.source_loading = false;
                 self.session_loading = false;
+                self.session_refresh_pending = false;
                 self.sessions.clear();
                 self.rebuild_session_items();
                 self.selected_file_id = None;
@@ -358,12 +363,11 @@ impl WorkspaceView {
             SourceLoadEvent::Indexed(file) => {
                 let file_id = file.id;
                 let refresh_active = self.selected_file_id == Some(file_id)
-                    && self.active_session.is_some()
-                    && !self.session_loading;
+                    && (self.active_session.is_some() || self.session_loading);
                 self.upsert_session(*file);
                 self.indexed_files = self.indexed_files.saturating_add(1);
                 if refresh_active {
-                    self.select_session(file_id, cx);
+                    self.refresh_session(file_id, cx);
                 }
             }
             SourceLoadEvent::Removed(ids) => {
@@ -376,6 +380,7 @@ impl WorkspaceView {
                     self.selected_file_id = None;
                     self.active_session = None;
                     self.session_loading = false;
+                    self.session_refresh_pending = false;
                     self.session_revision = self.session_revision.wrapping_add(1);
                     self.session_task = None;
                 }
@@ -503,7 +508,11 @@ impl WorkspaceView {
                 .and_then(|row| items.iter().position(|item| row.same_row(item)));
             self.session_list_state
                 .splice(prefix..old_end, new_end - prefix);
-            if let Some(item_ix) = anchor {
+            if self.session_items.is_empty() {
+                // An empty list can already have a painted zero anchor. An
+                // insertion at zero must not move that anchor to the new end.
+                self.session_list_state.scroll_to(ListOffset::default());
+            } else if let Some(item_ix) = anchor {
                 self.session_list_state
                     .scroll_to(ListOffset { item_ix, ..top });
             }
@@ -710,6 +719,23 @@ impl WorkspaceView {
     }
 
     fn select_session(&mut self, file_id: i64, cx: &mut Context<Self>) {
+        if self.selected_file_id == Some(file_id) && self.active_session.is_some() {
+            self.refresh_session(file_id, cx);
+            return;
+        }
+        self.session_refresh_pending = false;
+        self.load_session(file_id, false, cx);
+    }
+
+    fn refresh_session(&mut self, file_id: i64, cx: &mut Context<Self>) {
+        if self.session_loading {
+            self.session_refresh_pending = true;
+            return;
+        }
+        self.load_session(file_id, true, cx);
+    }
+
+    fn load_session(&mut self, file_id: i64, refreshing: bool, cx: &mut Context<Self>) {
         let Some(file) = self
             .sessions
             .iter()
@@ -719,7 +745,9 @@ impl WorkspaceView {
             return;
         };
         self.selected_file_id = Some(file_id);
-        self.active_session = None;
+        if !refreshing {
+            self.active_session = None;
+        }
         self.session_loading = true;
         self.session_revision = self.session_revision.wrapping_add(1);
         let revision = self.session_revision;
@@ -728,22 +756,18 @@ impl WorkspaceView {
         let initial_anchor = self.preferences.scroll_anchor(&session_path);
         let cancellation = self.cancellation.clone();
         let load = cx.background_spawn(async move {
-            smol::unblock(move || {
-                if file.source == SessionSource::TraeCn {
-                    return agentoria_core::trae_cn::load_snapshot(file, &cancellation)
-                        .map_err(|error| error.to_string());
-                }
-                let database =
-                    IndexDatabase::open(index_path).map_err(|error| format!("{error:#}"))?;
-                let conversations = database
-                    .conversation_lines(file.id)
-                    .map_err(|error| format!("{error:#}"))?;
-                let process = database
-                    .process_lines(file.id)
-                    .map_err(|error| format!("{error:#}"))?;
-                Ok::<_, String>((file, conversations, process))
-            })
-            .await
+            if file.source == SessionSource::TraeCn {
+                return agentoria_core::trae_cn::load_snapshot(file, &cancellation)
+                    .map_err(|error| error.to_string());
+            }
+            let database = IndexDatabase::open(index_path).map_err(|error| format!("{error:#}"))?;
+            let conversations = database
+                .conversation_lines(file.id)
+                .map_err(|error| format!("{error:#}"))?;
+            let process = database
+                .process_lines(file.id)
+                .map_err(|error| format!("{error:#}"))?;
+            Ok::<_, String>((file, conversations, process))
         });
         self.session_task = Some(cx.spawn(async move |weak, cx| {
             let result = load.await;
@@ -760,27 +784,37 @@ impl WorkspaceView {
                         }
                         view.status_text =
                             format!("Loaded {} conversation rows", conversations.len());
-                        let anchor_path = session_path.clone();
-                        let scroll_workspace = scroll_workspace.clone();
-                        view.active_session = Some(cx.new(|cx| {
-                            SessionView::new(
-                                file,
-                                conversations,
-                                process,
-                                initial_anchor,
-                                move |anchor, _, cx| {
-                                    let _ = scroll_workspace.update(cx, |view, cx| {
-                                        view.preferences.set_scroll_anchor(&anchor_path, anchor);
-                                        view.schedule_preferences_save(cx);
-                                    });
-                                },
-                                cx,
-                            )
-                        }));
+                        if let Some(session) = view.active_session.as_ref().filter(|_| refreshing) {
+                            session.update(cx, |session, cx| {
+                                session.update_snapshot(file, conversations, process, cx);
+                            });
+                        } else {
+                            let anchor_path = session_path.clone();
+                            let scroll_workspace = scroll_workspace.clone();
+                            view.active_session = Some(cx.new(|cx| {
+                                SessionView::new(
+                                    file,
+                                    conversations,
+                                    process,
+                                    initial_anchor,
+                                    move |anchor, _, cx| {
+                                        let _ = scroll_workspace.update(cx, |view, cx| {
+                                            view.preferences
+                                                .set_scroll_anchor(&anchor_path, anchor);
+                                            view.schedule_preferences_save(cx);
+                                        });
+                                    },
+                                    cx,
+                                )
+                            }));
+                        }
                     }
                     Err(message) => {
                         view.status_text = format!("Session load failed · {message}");
                     }
+                }
+                if std::mem::take(&mut view.session_refresh_pending) {
+                    view.refresh_session(file_id, cx);
                 }
                 cx.notify();
             });
@@ -1525,6 +1559,88 @@ mod tests {
     use super::*;
     use gpui::{TestAppContext, VisualTestContext};
     use std::{cell::RefCell, fs, rc::Rc};
+
+    #[gpui::test]
+    fn first_catalog_starts_at_top_even_after_the_empty_list_has_painted(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sample.jsonl");
+        fs::write(&path, "{}\n").unwrap();
+        let mut database = IndexDatabase::open_in_memory().unwrap();
+        let file = database
+            .scan_file(
+                SessionSource::Codex,
+                path,
+                &CancellationToken::default(),
+                |_| {},
+            )
+            .unwrap()
+            .file;
+        let view = cx.update(|cx| cx.new(|cx| WorkspaceView::empty(Preferences::default(), cx)));
+        view.update(cx, |view, cx| {
+            view.session_list_state.scroll_to(ListOffset::default());
+            view.apply_source_event(SourceLoadEvent::Cached(vec![file]), cx);
+            assert!(!view.session_items.is_empty());
+            let top = view.session_list_state.logical_scroll_top();
+            assert_eq!((top.item_ix, top.offset_in_item), (0, px(0.)));
+        });
+    }
+
+    #[gpui::test]
+    fn database_notifications_keep_the_open_entity_and_coalesce_pending_refreshes(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let directory = tempfile::tempdir().unwrap();
+        let index_path = directory.path().join("index.sqlite");
+        let path = directory.path().join("sample.jsonl");
+        fs::write(
+            &path,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"fixture\",\"source\":\"vscode\"}}\n",
+        )
+        .unwrap();
+        let mut database = IndexDatabase::open(&index_path).unwrap();
+        // Drive the database notification path with a local indexed fixture;
+        // the UI refresh test never needs the user's native database or key.
+        let file = database
+            .scan_file(
+                SessionSource::Codex,
+                path,
+                &CancellationToken::default(),
+                |_| {},
+            )
+            .unwrap()
+            .file;
+        let view = cx.update(|cx| {
+            cx.new(|cx| {
+                let mut view = WorkspaceView::empty(Preferences::default(), cx);
+                view.index_path = index_path;
+                view.sessions = vec![file.clone()];
+                view.selected_file_id = Some(file.id);
+                view.active_session = Some(cx.new(|cx| {
+                    SessionView::new(file.clone(), Vec::new(), Vec::new(), None, |_, _, _| {}, cx)
+                }));
+                view
+            })
+        });
+        let entity = view.read_with(cx, |view, _| {
+            view.active_session.as_ref().unwrap().entity_id()
+        });
+        view.update(cx, |view, cx| {
+            view.apply_source_event(SourceLoadEvent::DatabaseSnapshot(vec![file.clone()]), cx);
+            assert_eq!(view.active_session.as_ref().unwrap().entity_id(), entity);
+            assert!(view.session_loading);
+            let revision = view.session_revision;
+            view.apply_source_event(SourceLoadEvent::DatabaseSnapshot(vec![file.clone()]), cx);
+            assert!(view.session_refresh_pending);
+            assert_eq!(view.session_revision, revision);
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.active_session.as_ref().unwrap().entity_id(), entity);
+            assert!(!view.session_loading && !view.session_refresh_pending);
+        });
+    }
 
     #[gpui::test]
     fn sidebar_keeps_its_visible_row_after_metadata_updates_and_group_reordering(
