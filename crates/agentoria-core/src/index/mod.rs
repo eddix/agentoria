@@ -169,6 +169,9 @@ impl IndexDatabase {
         cancellation: &CancellationToken,
         on_progress: impl FnMut(ScanProgress),
     ) -> Result<ScanOutcome> {
+        if source == SessionSource::TraeCn {
+            bail!("Trae CN sessions are read from their native database");
+        }
         let canonical = path
             .as_ref()
             .canonicalize()
@@ -540,6 +543,9 @@ pub fn load_conversation_line(
     line: &IndexedLine,
     max_source_bytes: u64,
 ) -> Result<Option<ConversationBody>> {
+    if line.source == SessionSource::TraeCn {
+        return crate::trae_cn::load_conversation(line, max_source_bytes);
+    }
     let Some(kind) = line.conversation_kind else {
         return Ok(None);
     };
@@ -605,6 +611,9 @@ pub fn load_conversation_line(
 }
 
 pub fn load_process_line(line: &IndexedLine, max_source_bytes: u64) -> Result<ProcessBody> {
+    if line.source == SessionSource::TraeCn {
+        return crate::trae_cn::load_process(line, max_source_bytes);
+    }
     if line.byte_len > max_source_bytes {
         return Ok(ProcessBody::Oversized {
             source_bytes: line.byte_len,
@@ -632,6 +641,9 @@ pub fn read_line_chunk(
 ) -> Result<Vec<u8>> {
     if relative_offset >= line.byte_len || max_bytes == 0 {
         return Ok(Vec::new());
+    }
+    if line.source == SessionSource::TraeCn {
+        return crate::trae_cn::read_chunk(line, relative_offset, max_bytes);
     }
     let remaining = line.byte_len - relative_offset;
     let len = remaining.min(max_bytes as u64);
@@ -1300,6 +1312,7 @@ fn source_name(source: SessionSource) -> &'static str {
         SessionSource::Claude => "claude",
         SessionSource::Codex => "codex",
         SessionSource::Grok => "grok",
+        SessionSource::TraeCn => "trae-cn",
     }
 }
 
@@ -1332,6 +1345,7 @@ fn source_from_name(value: &str) -> rusqlite::Result<SessionSource> {
         "claude" => Ok(SessionSource::Claude),
         "codex" => Ok(SessionSource::Codex),
         "grok" => Ok(SessionSource::Grok),
+        "trae-cn" => Ok(SessionSource::TraeCn),
         _ => Err(rusqlite::Error::FromSqlConversionFailure(
             1,
             rusqlite::types::Type::Text,

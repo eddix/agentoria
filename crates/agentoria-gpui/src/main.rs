@@ -9,6 +9,7 @@ mod session_view;
 mod skill_catalog;
 mod skills_view;
 mod themes;
+mod trae_key_view;
 mod workdir_filter;
 mod workspace;
 

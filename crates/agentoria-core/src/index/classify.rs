@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 use super::ConversationKind;
 use crate::{EventMeta, SessionEvent, SessionSource};
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(super) struct LineDescriptor {
     pub event_type: String,
     pub timestamp: Option<String>,
@@ -27,6 +27,10 @@ pub(super) fn classify_line(source: SessionSource, value: &Value) -> LineDescrip
         SessionSource::Claude => classify_claude(value),
         SessionSource::Codex => classify_codex(value),
         SessionSource::Grok => classify_grok(value),
+        SessionSource::TraeCn => LineDescriptor {
+            event_type: "trae.native".into(),
+            ..Default::default()
+        },
     }
 }
 
@@ -38,6 +42,7 @@ pub(super) fn extract_conversation_text(
         SessionSource::Claude => extract_claude_conversation(value),
         SessionSource::Codex => extract_codex_conversation(value),
         SessionSource::Grok => crate::grok::conversation(value),
+        SessionSource::TraeCn => None,
     }
 }
 
@@ -50,6 +55,7 @@ pub(super) fn extract_process_events(
         SessionSource::Claude => extract_claude_process(value, line_number),
         SessionSource::Codex => extract_codex_process(value, line_number),
         SessionSource::Grok => crate::grok::process_events(value, line_number),
+        SessionSource::TraeCn => Vec::new(),
     }
 }
 

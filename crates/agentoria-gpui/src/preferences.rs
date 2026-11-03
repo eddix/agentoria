@@ -82,6 +82,7 @@ impl Preferences {
         match self.source.as_str() {
             "claude" => SessionSource::Claude,
             "grok" => SessionSource::Grok,
+            "trae-cn" => SessionSource::TraeCn,
             _ => SessionSource::Codex,
         }
     }
@@ -91,6 +92,7 @@ impl Preferences {
             SessionSource::Claude => "claude",
             SessionSource::Codex => "codex",
             SessionSource::Grok => "grok",
+            SessionSource::TraeCn => "trae-cn",
         }
         .to_string();
     }
@@ -134,6 +136,22 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{Preferences, ScrollAnchor, ViewMode};
+
+    #[test]
+    fn remembers_trae_cn_source_without_storing_session_keys_in_preferences() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("preferences.json");
+        let mut preferences = Preferences::default();
+        preferences.set_source(agentoria_core::SessionSource::TraeCn);
+        preferences.save_to(&path).unwrap();
+        assert_eq!(
+            Preferences::load_from(&path).source(),
+            agentoria_core::SessionSource::TraeCn
+        );
+        assert!(!std::fs::read_to_string(path)
+            .unwrap()
+            .contains("sqlcipher_key"));
+    }
 
     #[test]
     fn preferences_round_trip_native_state() -> Result<()> {

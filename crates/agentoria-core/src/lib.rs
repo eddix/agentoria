@@ -3,6 +3,7 @@ mod codex;
 mod grok;
 pub mod index;
 mod model;
+pub mod trae_cn;
 mod util;
 
 use std::{
@@ -22,6 +23,7 @@ pub fn parse_source(raw: &str) -> Result<SessionSource> {
         "codex" => Ok(SessionSource::Codex),
         "claude" => Ok(SessionSource::Claude),
         "grok" | "grok-build" => Ok(SessionSource::Grok),
+        "trae-cn" => Ok(SessionSource::TraeCn),
         _ => bail!("unknown source: {raw}"),
     }
 }
@@ -31,6 +33,7 @@ pub fn list_sessions(source: SessionSource) -> Result<Vec<SessionSummary>> {
         SessionSource::Codex => codex::list_sessions(),
         SessionSource::Claude => claude::list_sessions(),
         SessionSource::Grok => grok::list_sessions(),
+        SessionSource::TraeCn => trae_cn::list_sessions(),
     }
 }
 
@@ -38,11 +41,15 @@ pub fn get_session_detail(
     source: SessionSource,
     raw_path: impl AsRef<Path>,
 ) -> Result<SessionDetail> {
+    if source == SessionSource::TraeCn {
+        return trae_cn::read_session_detail(raw_path.as_ref());
+    }
     let path = validate_session_path(source, raw_path.as_ref())?;
     match source {
         SessionSource::Codex => codex::read_session_detail(&path),
         SessionSource::Claude => claude::read_session_detail(&path),
         SessionSource::Grok => grok::read_session_detail(&path),
+        SessionSource::TraeCn => trae_cn::read_session_detail(&path),
     }
 }
 
@@ -51,6 +58,7 @@ pub fn source_root(source: SessionSource) -> Result<PathBuf> {
         SessionSource::Codex => Ok(util::codex_root()?.join("sessions")),
         SessionSource::Claude => util::claude_root(),
         SessionSource::Grok => Ok(util::grok_root()?.join("sessions")),
+        SessionSource::TraeCn => trae_cn::root(),
     }
 }
 
@@ -62,6 +70,9 @@ pub struct DiscoveredSessionFile {
 }
 
 pub fn discover_session_files(source: SessionSource) -> Result<Vec<DiscoveredSessionFile>> {
+    if source == SessionSource::TraeCn {
+        bail!("Trae CN uses its native session database catalog");
+    }
     let root = source_root(source)?;
     discover_session_files_at(source, &root)
 }
@@ -69,6 +80,7 @@ pub fn discover_session_files(source: SessionSource) -> Result<Vec<DiscoveredSes
 pub fn is_session_file(source: SessionSource, path: &Path) -> bool {
     match source {
         SessionSource::Grok => grok::is_transcript(path),
+        SessionSource::TraeCn => false,
         _ => path.extension().and_then(|value| value.to_str()) == Some("jsonl"),
     }
 }
@@ -136,6 +148,7 @@ pub fn load_session_titles(source: SessionSource) -> Result<HashMap<PathBuf, Str
         SessionSource::Claude => claude::session_titles(),
         SessionSource::Codex => codex::session_titles(),
         SessionSource::Grok => Ok(HashMap::new()),
+        SessionSource::TraeCn => Ok(HashMap::new()),
     }
 }
 
@@ -158,6 +171,16 @@ fn validate_session_path(source: SessionSource, candidate: &Path) -> Result<Path
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trae_cn_source_serialization_is_separate_from_cli_sources() {
+        assert_eq!(parse_source("trae-cn").unwrap(), SessionSource::TraeCn);
+        assert_eq!(
+            serde_json::to_string(&SessionSource::TraeCn).unwrap(),
+            "\"trae-cn\""
+        );
+        assert!(parse_source("traecli").is_err());
+    }
 
     #[test]
     fn grok_discovery_and_watching_select_one_transcript_and_map_summary_changes() {

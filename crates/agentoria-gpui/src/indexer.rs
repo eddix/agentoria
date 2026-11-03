@@ -19,6 +19,8 @@ use rusqlite::{Connection, DatabaseName, OpenFlags};
 #[derive(Debug)]
 pub enum SourceLoadEvent {
     Cached(Vec<IndexedFile>),
+    DatabaseSnapshot(Vec<IndexedFile>),
+    TraeKeyRequired(String),
     Discovered {
         total: usize,
     },
@@ -118,6 +120,9 @@ pub fn run_source_load(
     cancellation: &CancellationToken,
     sender: &Sender<SourceLoadEvent>,
 ) -> Result<()> {
+    if source == SessionSource::TraeCn {
+        return run_trae_source_load(cancellation, sender);
+    }
     let mut database = IndexDatabase::open(index_path)?;
     reconcile_missing_sessions(source, &mut database, cancellation, sender)?;
     if source == SessionSource::Codex {
@@ -177,6 +182,88 @@ pub fn run_source_load(
     reconcile_missing_sessions(source, &mut database, cancellation, sender)?;
     sender.send_blocking(SourceLoadEvent::Finished).ok();
     watch_source(source, &mut database, &titles, cancellation, sender)
+}
+
+fn run_trae_source_load(
+    cancellation: &CancellationToken,
+    sender: &Sender<SourceLoadEvent>,
+) -> Result<()> {
+    use agentoria_core::trae_cn::{self, credentials::KeyError};
+    let publish = || -> Result<bool> {
+        match trae_cn::list_indexed_sessions(cancellation) {
+            Ok(files) => {
+                if cancellation.is_cancelled() {
+                    return Ok(false);
+                }
+                sender
+                    .send_blocking(SourceLoadEvent::DatabaseSnapshot(files))
+                    .ok();
+                sender.send_blocking(SourceLoadEvent::Finished).ok();
+                Ok(true)
+            }
+            Err(error) if error.downcast_ref::<KeyError>().is_some() => {
+                sender
+                    .send_blocking(SourceLoadEvent::TraeKeyRequired(
+                        if error.downcast_ref::<KeyError>() == Some(&KeyError::Missing) {
+                            String::new()
+                        } else {
+                            error.to_string()
+                        },
+                    ))
+                    .ok();
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    };
+    if !publish()? {
+        return Ok(());
+    }
+    let root = trae_cn::root()?;
+    if !root.exists() {
+        return Ok(());
+    }
+    let root = root.canonicalize()?;
+    let (events, receiver) = mpsc::channel();
+    let mut watcher = notify::recommended_watcher(move |event: notify::Result<Event>| {
+        events.send(event).ok();
+    })?;
+    watcher.watch(&root, RecursiveMode::Recursive)?;
+    while !cancellation.is_cancelled() {
+        let first = match receiver.recv_timeout(Duration::from_millis(400)) {
+            Ok(event) => event,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        let relevant = |event: notify::Result<Event>| match event {
+            Err(_) => true,
+            Ok(event) => {
+                !matches!(event.kind, EventKind::Access(_))
+                    && (event.need_rescan()
+                        || event.paths.iter().any(|path| {
+                            let Ok(relative) = path.strip_prefix(&root) else {
+                                return false;
+                            };
+                            let names = relative.iter().collect::<Vec<_>>();
+                            names.len() == 2
+                                && matches!(names[0].to_str(), Some("ai-agent" | "ai-chat"))
+                                && matches!(
+                                    names[1].to_str(),
+                                    Some("database.db" | "database.db-wal")
+                                )
+                        }))
+            }
+        };
+        let mut changed = relevant(first);
+        std::thread::sleep(Duration::from_millis(500));
+        while let Ok(event) = receiver.try_recv() {
+            changed |= relevant(event);
+        }
+        if changed && !cancellation.is_cancelled() && !publish()? {
+            break;
+        }
+    }
+    Ok(())
 }
 
 fn watch_source(

@@ -7,6 +7,8 @@ pub enum SessionSource {
     Claude,
     Codex,
     Grok,
+    #[serde(rename = "trae-cn")]
+    TraeCn,
 }
 
 #[derive(Debug, Clone, Serialize)]

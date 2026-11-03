@@ -9,11 +9,13 @@ description = "Session discovery and parsing for Agentoria"
 anyhow = "1"
 chrono = { version = "0.4", features = ["clock"] }
 dirs = "6"
-rusqlite = { version = "0.32.1", features = ["bundled"] }
+rusqlite = { version = "0.32.1", features = ["blob", "bundled-sqlcipher-vendored-openssl"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 walkdir = "2"
+zeroize = "1"
+url = "2"
 
 [dev-dependencies]
 tempfile = "3"

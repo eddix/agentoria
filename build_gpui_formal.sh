@@ -62,6 +62,8 @@ assemble_bundle() {
   install -m 644 \
     "${SCRIPT_DIR}/assets/icon.icns" \
     "${STAGING_APP}/Contents/Resources/icon.icns"
+  ditto "${SCRIPT_DIR}/assets/licenses" "${STAGING_APP}/Contents/Resources/licenses"
+  install -m 644 "${SCRIPT_DIR}/THIRD_PARTY_NOTICES.md" "${STAGING_APP}/Contents/Resources/THIRD_PARTY_NOTICES.md"
   codesign --force --deep --sign - "$STAGING_APP"
   codesign --verify --deep --strict --verbose=2 "$STAGING_APP"
 }

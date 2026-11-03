@@ -869,8 +869,13 @@ impl SessionView {
                     .min_w_0()
                     .gap_1()
                     .child(format!(
-                        "{} process events aggregated",
-                        self.file.process_count
+                        "{} process {} aggregated",
+                        self.file.process_count,
+                        if self.file.source == agentoria_core::SessionSource::TraeCn {
+                            "records"
+                        } else {
+                            "events"
+                        }
                     ))
                     .child(
                         div()

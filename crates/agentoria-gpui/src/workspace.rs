@@ -34,6 +34,7 @@ use crate::{
     skill_catalog::SkillAgent,
     skills_view::SkillsView,
     themes,
+    trae_key_view::{KeySaved, TraeKeyView},
     workdir_filter::WorkdirFilter,
 };
 
@@ -73,6 +74,9 @@ pub struct WorkspaceView {
     hooks_view: Option<Entity<ConfigView>>,
     mcp_view: Option<Entity<ConfigView>>,
     config_subscriptions: Vec<Subscription>,
+    trae_key_message: Option<String>,
+    trae_key_view: Option<Entity<TraeKeyView>>,
+    trae_key_subscription: Option<Subscription>,
     source_loading: bool,
     session_loading: bool,
     discovered_files: usize,
@@ -122,6 +126,9 @@ impl WorkspaceView {
             hooks_view: None,
             mcp_view: None,
             config_subscriptions: Vec::new(),
+            trae_key_message: None,
+            trae_key_view: None,
+            trae_key_subscription: None,
             source_loading: false,
             session_loading: false,
             discovered_files: 0,
@@ -195,6 +202,9 @@ impl WorkspaceView {
 
     fn load_source(&mut self, source: SessionSource, cx: &mut Context<Self>) {
         self.cancellation.cancel();
+        self.trae_key_message = None;
+        self.trae_key_view = None;
+        self.trae_key_subscription = None;
         self.cancellation = CancellationToken::default();
         self.source_revision = self.source_revision.wrapping_add(1);
         self.session_revision = self.session_revision.wrapping_add(1);
@@ -257,9 +267,53 @@ impl WorkspaceView {
     fn apply_source_event(&mut self, event: SourceLoadEvent, cx: &mut Context<Self>) {
         let directories_changed = matches!(
             &event,
-            SourceLoadEvent::Cached(_) | SourceLoadEvent::Indexed(_) | SourceLoadEvent::Removed(_)
+            SourceLoadEvent::Cached(_)
+                | SourceLoadEvent::DatabaseSnapshot(_)
+                | SourceLoadEvent::Indexed(_)
+                | SourceLoadEvent::Removed(_)
         );
         match event {
+            SourceLoadEvent::DatabaseSnapshot(files) => {
+                let previous_session_id = self
+                    .selected_file_id
+                    .and_then(|id| self.sessions.iter().find(|file| file.id == id))
+                    .and_then(|file| file.session_id.clone());
+                self.sessions = files;
+                self.sort_sessions();
+                self.rebuild_session_items();
+                if let Some(id) = self.selected_file_id {
+                    if previous_session_id.is_some()
+                        && self
+                            .sessions
+                            .iter()
+                            .any(|file| file.id == id && file.session_id == previous_session_id)
+                    {
+                        if self.active_session.is_some() && !self.session_loading {
+                            self.select_session(id, cx);
+                        }
+                    } else {
+                        self.selected_file_id = None;
+                        self.active_session = None;
+                        self.session_loading = false;
+                        self.session_revision = self.session_revision.wrapping_add(1);
+                        self.session_task = None;
+                    }
+                }
+            }
+            SourceLoadEvent::TraeKeyRequired(message) => {
+                self.source_loading = false;
+                self.session_loading = false;
+                self.sessions.clear();
+                self.rebuild_session_items();
+                self.selected_file_id = None;
+                self.active_session = None;
+                self.session_revision = self.session_revision.wrapping_add(1);
+                self.session_task = None;
+                self.trae_key_message = Some(message);
+                self.trae_key_view = None;
+                self.trae_key_subscription = None;
+                self.status_text = "Trae CN session key required".into();
+            }
             SourceLoadEvent::Cached(files) => {
                 self.sessions = files;
                 self.sort_sessions();
@@ -481,6 +535,7 @@ impl WorkspaceView {
                 SessionSource::Claude => SkillAgent::Claude,
                 SessionSource::Codex => SkillAgent::Codex,
                 SessionSource::Grok => SkillAgent::Grok,
+                SessionSource::TraeCn => SkillAgent::Trae,
             };
             let workspace = self
                 .selected_file_id
@@ -506,6 +561,7 @@ impl WorkspaceView {
                     SessionSource::Claude => ConfigAgent::Claude,
                     SessionSource::Codex => ConfigAgent::Codex,
                     SessionSource::Grok => ConfigAgent::Grok,
+                    SessionSource::TraeCn => ConfigAgent::Codex,
                 };
                 let kind = if mode == ContentMode::Hooks {
                     ConfigKind::Hooks
@@ -630,8 +686,13 @@ impl WorkspaceView {
         let index_path = self.index_path.clone();
         let session_path = file.path.clone();
         let initial_anchor = self.preferences.scroll_anchor(&session_path);
+        let cancellation = self.cancellation.clone();
         let load = cx.background_spawn(async move {
             smol::unblock(move || {
+                if file.source == SessionSource::TraeCn {
+                    return agentoria_core::trae_cn::load_snapshot(file, &cancellation)
+                        .map_err(|error| error.to_string());
+                }
                 let database =
                     IndexDatabase::open(index_path).map_err(|error| format!("{error:#}"))?;
                 let conversations = database
@@ -654,6 +715,9 @@ impl WorkspaceView {
                 view.session_loading = false;
                 match result {
                     Ok((file, conversations, process)) => {
+                        if file.source == SessionSource::TraeCn {
+                            view.upsert_session(file.clone());
+                        }
                         view.status_text =
                             format!("Loaded {} conversation rows", conversations.len());
                         let anchor_path = session_path.clone();
@@ -697,6 +761,7 @@ impl WorkspaceView {
                 SessionSource::Claude => SkillAgent::Claude,
                 SessionSource::Codex => SkillAgent::Codex,
                 SessionSource::Grok => SkillAgent::Grok,
+                SessionSource::TraeCn => SkillAgent::Trae,
             });
         let source_button: AnyElement = if self.mode == ContentMode::Sessions {
             Button::new("source-menu")
@@ -708,6 +773,7 @@ impl WorkspaceView {
                     let claude_weak = source_weak.clone();
                     let codex_weak = source_weak.clone();
                     let grok_weak = source_weak.clone();
+                    let trae_weak = source_weak.clone();
                     menu.label("Session Source")
                         .item(
                             PopupMenuItem::new("Claude")
@@ -733,6 +799,15 @@ impl WorkspaceView {
                                 .on_click(move |_, _, cx| {
                                     let _ = grok_weak.update(cx, |view, cx| {
                                         view.load_source(SessionSource::Grok, cx)
+                                    });
+                                }),
+                        )
+                        .item(
+                            PopupMenuItem::new("Trae CN")
+                                .checked(source == SessionSource::TraeCn)
+                                .on_click(move |_, _, cx| {
+                                    let _ = trae_weak.update(cx, |view, cx| {
+                                        view.load_source(SessionSource::TraeCn, cx)
                                     });
                                 }),
                         )
@@ -1009,6 +1084,13 @@ impl WorkspaceView {
                     }))
                     .child(Input::new(input).id("workdir-filter").aria_label("Filter work directories").cleanable(true).w_full()))
             })
+            .when(self.source==SessionSource::TraeCn,|this|this.child(
+                h_flex().gap_2().px_4().py_2().border_b_1().border_color(cx.theme().sidebar_border)
+                    .child(Button::new("refresh-trae-cn").xsmall().outline().label("Refresh").on_click(cx.listener(|view,_,_,cx|view.load_source(SessionSource::TraeCn,cx))))
+                    .child(Button::new("trae-cn-key-setup").xsmall().outline().label("Session key").on_click(cx.listener(|view,_,_,cx|{
+                        view.trae_key_message=Some(String::new());view.trae_key_view=None;view.trae_key_subscription=None;cx.notify();
+                    })))
+            ))
             .when(self.workdir_filter.matching || (count == 0 && !self.workdir_filter.query.trim().is_empty()), |this| {
                 this.child(div().px_4().py_3().text_xs().text_color(cx.theme().muted_foreground)
                     .child(if self.workdir_filter.matching { "Matching work directories…" } else { "No matching work directories" }))
@@ -1108,11 +1190,15 @@ impl WorkspaceView {
                     .justify_between()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child(format!(
-                        "{} messages · {} process",
-                        file.user_count + file.assistant_count,
-                        file.process_count
-                    ))
+                    .child(if file.source == SessionSource::TraeCn {
+                        format!("{} turns · {} process", file.user_count, file.process_count)
+                    } else {
+                        format!(
+                            "{} messages · {} process",
+                            file.user_count + file.assistant_count,
+                            file.process_count
+                        )
+                    })
                     .child(short_timestamp(&file.updated_at)),
             )
             .into_any_element()
@@ -1140,7 +1226,7 @@ impl WorkspaceView {
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("The transcript is loaded lazily from its JSONL byte offsets."),
+                    .child("Select a session to read the conversation."),
             )
             .into_any_element()
     }
@@ -1232,25 +1318,45 @@ impl Render for WorkspaceView {
         if self.mode == ContentMode::Sessions {
             self.ensure_workdir_input(window, cx);
         }
-        let content: AnyElement = if self.mode == ContentMode::Skills {
-            self.skills_view
-                .as_ref()
-                .map(|skills| skills.clone().into_any_element())
-                .unwrap_or_else(|| div().into_any_element())
-        } else if let Some(config) = self.config_view() {
-            config.clone().into_any_element()
-        } else {
-            h_resizable("workspace-split")
-                .with_state(&self.resizable_state)
-                .child(
-                    resizable_panel()
-                        .size(px(340.))
-                        .size_range(px(280.)..px(520.))
-                        .child(self.render_sidebar(cx)),
-                )
-                .child(resizable_panel().child(self.render_detail(cx)))
-                .into_any_element()
-        };
+        if self.mode == ContentMode::Sessions
+            && self.trae_key_message.is_some()
+            && self.trae_key_view.is_none()
+        {
+            let message = self
+                .trae_key_message
+                .clone()
+                .filter(|message| !message.is_empty());
+            let key = cx.new(|cx| TraeKeyView::new(message, window, cx));
+            self.trae_key_subscription = Some(cx.subscribe(&key, |view, _, _: &KeySaved, cx| {
+                view.load_source(SessionSource::TraeCn, cx)
+            }));
+            self.trae_key_view = Some(key);
+        }
+        let content: AnyElement =
+            if self.mode == ContentMode::Sessions && self.trae_key_message.is_some() {
+                self.trae_key_view
+                    .as_ref()
+                    .map(|view| view.clone().into_any_element())
+                    .unwrap_or_else(|| div().into_any_element())
+            } else if self.mode == ContentMode::Skills {
+                self.skills_view
+                    .as_ref()
+                    .map(|skills| skills.clone().into_any_element())
+                    .unwrap_or_else(|| div().into_any_element())
+            } else if let Some(config) = self.config_view() {
+                config.clone().into_any_element()
+            } else {
+                h_resizable("workspace-split")
+                    .with_state(&self.resizable_state)
+                    .child(
+                        resizable_panel()
+                            .size(px(340.))
+                            .size_range(px(280.)..px(520.))
+                            .child(self.render_sidebar(cx)),
+                    )
+                    .child(resizable_panel().child(self.render_detail(cx)))
+                    .into_any_element()
+            };
         v_flex()
             .size_full()
             .min_h_0()
@@ -1312,6 +1418,7 @@ fn source_label(source: SessionSource) -> &'static str {
         SessionSource::Claude => "Claude",
         SessionSource::Codex => "Codex",
         SessionSource::Grok => "Grok Build",
+        SessionSource::TraeCn => "Trae CN",
     }
 }
 
@@ -1329,6 +1436,9 @@ fn file_title(file: &IndexedFile) -> String {
 }
 
 fn workspace_label(file: &IndexedFile) -> String {
+    if file.source == SessionSource::TraeCn && file.working_dir.is_none() {
+        return "Unknown workspace".into();
+    }
     file.working_dir
         .as_deref()
         .map(Path::new)
@@ -1338,6 +1448,9 @@ fn workspace_label(file: &IndexedFile) -> String {
 }
 
 fn workspace_group_key(file: &IndexedFile) -> String {
+    if file.source == SessionSource::TraeCn && file.working_dir.is_none() {
+        return "trae-cn:unknown-workspace".into();
+    }
     file.working_dir
         .clone()
         .or_else(|| {
@@ -1349,12 +1462,7 @@ fn workspace_group_key(file: &IndexedFile) -> String {
 }
 
 fn workspace_group_label(file: &IndexedFile) -> String {
-    file.working_dir
-        .as_deref()
-        .map(Path::new)
-        .map(short_path)
-        .or_else(|| file.path.parent().map(short_path))
-        .unwrap_or_else(|| "Unknown workspace".to_string())
+    workspace_label(file)
 }
 
 fn short_path(path: &Path) -> String {
@@ -1377,6 +1485,72 @@ mod tests {
     use super::*;
     use gpui::{TestAppContext, VisualTestContext};
     use std::{cell::RefCell, fs, rc::Rc};
+
+    #[gpui::test]
+    fn missing_native_session_or_key_invalidates_open_plaintext_and_pending_load(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sample.jsonl");
+        fs::write(&path, "{}\n").unwrap();
+        let mut database = IndexDatabase::open_in_memory().unwrap();
+        let mut file = database
+            .scan_file(
+                SessionSource::Codex,
+                path,
+                &CancellationToken::default(),
+                |_| {},
+            )
+            .unwrap()
+            .file;
+        file.source = SessionSource::TraeCn;
+        file.id = -3;
+        file.session_id = Some("session".into());
+        let view = cx.update(|cx| {
+            cx.new(|cx| {
+                let mut view = WorkspaceView::empty(Preferences::default(), cx);
+                view.source = SessionSource::TraeCn;
+                view.sessions = vec![file.clone()];
+                view.selected_file_id = Some(file.id);
+                view.active_session = Some(cx.new(|cx| {
+                    SessionView::new(file.clone(), Vec::new(), Vec::new(), None, |_, _, _| {}, cx)
+                }));
+                view.session_loading = true;
+                view.session_task = Some(cx.spawn(async |_, _| std::future::pending::<()>().await));
+                view
+            })
+        });
+        view.update(cx, |view, cx| {
+            let revision = view.session_revision;
+            view.apply_source_event(SourceLoadEvent::DatabaseSnapshot(Vec::new()), cx);
+            assert!(
+                view.active_session.is_none()
+                    && view.selected_file_id.is_none()
+                    && !view.session_loading
+            );
+            assert!(view.session_task.is_none());
+            assert_eq!(view.session_revision, revision + 1);
+            view.sessions = vec![file.clone()];
+            view.selected_file_id = Some(file.id);
+            view.session_loading = true;
+            let mut replacement = file.clone();
+            replacement.session_id = Some("replacement".into());
+            view.apply_source_event(SourceLoadEvent::DatabaseSnapshot(vec![replacement]), cx);
+            assert!(view.selected_file_id.is_none() && !view.session_loading);
+            view.sessions = vec![file.clone()];
+            view.selected_file_id = Some(file.id);
+            view.session_loading = true;
+            view.apply_source_event(SourceLoadEvent::TraeKeyRequired(String::new()), cx);
+            assert!(
+                view.sessions.is_empty()
+                    && view.active_session.is_none()
+                    && view.selected_file_id.is_none()
+            );
+            assert!(view.trae_key_message.is_some());
+            assert!(!view.source_loading && !view.session_loading);
+        });
+    }
 
     #[gpui::test]
     fn workdir_input_filters_groups_without_changing_recency_selection_or_collapse_state(

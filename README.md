@@ -2,7 +2,7 @@
 
 Agentoria is a read-only macOS app for browsing local coding-agent sessions, Skills, hooks, and MCP configuration.
 
-- Browse Claude Code, Codex, and Grok Build conversations by recency or workspace. Long transcripts are indexed incrementally and rendered lazily.
+- Browse Claude Code, Codex, Grok Build, and Trae CN desktop conversations by recency or workspace. Long transcripts are rendered lazily.
 - Filter Sessions by work directory with the embedded Rust `nucleo-matcher` engine. Type abbreviations or multiple terms; `^prefix`, `suffix$`, `'exact`, and `!exclude` are supported, as is `~/`. Matching uses smart case and Unicode normalization. Grouped orders matching directories by score, with sessions newest first inside each group; Recent keeps chronological order. Escape in the filter clears it. The query stays when switching source or view mode and does not search transcript text or session titles.
 - The existing **Hidden / Shown** control includes Codex auxiliary sessions such as guardian reviews. Cached classifications are refreshed before displaying the list without rebuilding transcript offsets or changing source files.
 - Find USER/ASSISTANT message text with `⌘F` or the transcript's **Find** button. Matching ignores case and searches the Markdown source. Use `Enter` / `Shift+Enter` or `⌘G` / `⌘⇧G` to cycle through matches, and `Esc` to close. The search bar reports skipped large or unreadable records and any result limit.
@@ -12,7 +12,7 @@ Agentoria is a read-only macOS app for browsing local coding-agent sessions, Ski
 - Switch between the built-in light and dark themes. Preferences and the rebuildable SQLite index stay on your Mac.
 - Quit with `⌘Q`, the application menu, or by closing the last window.
 
-Agentoria never modifies agent sessions, Skills, or configuration. It does not upload their content or execute hooks and MCP servers.
+Agentoria never modifies agent sessions, Skills, or agent configuration. It does not upload their content or execute hooks and MCP servers.
 
 ## Download
 
@@ -31,6 +31,12 @@ This builds the release binary, ad-hoc signs it, installs `~/Applications/Agento
 Run the tests with `cargo test --workspace --locked`.
 
 ## Local data
+
+Trae CN desktop sessions are read directly from the encrypted `~/Library/Application Support/Trae CN/ModularData/ai-agent/database.db`, including its active WAL. The current `ai-agent` database takes precedence over the older `ai-chat` location, so migrated history is not duplicated. This integration targets the verified Trae CN 3.4.13 database schema; it is separate from Trae CLI. No running Trae process, Keychain query, internal IPC, or plaintext database export is needed. `AGENTORIA_TRAE_CN_DATA_DIR` can override the `ModularData` root.
+
+Select **Trae CN** in Sessions. On first use, enter your own installation's 64-character hexadecimal session key. Agentoria validates it before saving it to `~/.config/agentoria/trae-cn.json`, with directory mode `0700` and file mode `0600`. The file contains the key in plaintext as requested for local reuse; keep it private. The key is not part of preferences, the transcript index, logs, or the application binary. Use **Session key** in the sidebar to replace it; a failed validation preserves the previous saved key. Formal and Preview share this user-supplied credential file.
+
+Trae CN's catalog and message references are queried from its native SQLite indexes, without a duplicate transcript cache. Original USER text comes from `chat_message.user_message_context.query`; older migrated rows without that field fall back only to their own linked `user_input` history. Explicitly empty original inputs stay empty. The sidebar counts user turns rather than model response chunks; assistant text comes from `history_v2.raw_messages`, and child agent runs with an explicit `agent_run.parent_run_id` stay in process details. Archived conversation messages remain available; soft-deleted sessions and records are excluded. Multi-root projects use the first available workspace folder for grouping. Database/WAL changes refresh the catalog; **Refresh** rereads it manually. These desktop sessions are currently all treated as ordinary sessions at the session-list level.
 
 Grok Build sessions are read from `~/.grok/sessions/` (or `$GROK_HOME/sessions/`). Agentoria prefers the complete `updates.jsonl` timeline, merges adjacent text chunks, and falls back to `chat_history.jsonl` for older sessions. It reads titles, workspace, model, and session dates from `summary.json`; changes to that file refresh the list without rescanning the transcript. Grok Skills browsing includes built-in skills in `~/.grok/bundled/skills` and the standard `.grok`, `.agents`, `.claude`, and `.cursor` user/project `skills/` and `commands/` directories; custom runtime configuration and plugin caches are outside this catalog.
 

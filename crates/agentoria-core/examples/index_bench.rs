@@ -53,6 +53,7 @@ fn run(source: SessionSource, session: PathBuf) -> Result<()> {
             SessionSource::Claude => "claude",
             SessionSource::Codex => "codex",
             SessionSource::Grok => "grok",
+            SessionSource::TraeCn => "trae-cn",
         },
         outcome.file.file_size,
         outcome.file.line_count,
