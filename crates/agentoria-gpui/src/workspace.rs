@@ -10,8 +10,9 @@ use agentoria_core::{
 };
 use gpui::{
     div, list, prelude::FluentBuilder as _, px, Anchor, AnyElement, App, AppContext, Context,
-    Entity, InteractiveElement, IntoElement, KeyDownEvent, ListAlignment, ListState, ParentElement,
-    Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Task, Window,
+    Entity, InteractiveElement, IntoElement, KeyDownEvent, ListAlignment, ListOffset, ListState,
+    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Task,
+    Window,
 };
 use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
@@ -54,6 +55,16 @@ enum SessionListItem {
         count: usize,
     },
     Session(i64),
+}
+
+impl SessionListItem {
+    fn same_row(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Group { key: left, .. }, Self::Group { key: right, .. }) => left == right,
+            (Self::Session(left), Self::Session(right)) => left == right,
+            _ => false,
+        }
+    }
 }
 
 pub struct WorkspaceView {
@@ -429,7 +440,7 @@ impl WorkspaceView {
             .filter(|file| self.workdir_filter.includes(file.working_dir.as_deref()))
             .collect::<Vec<_>>();
         self.filtered_session_count = visible.len();
-        self.session_items = match self.preferences.view_mode {
+        let items: Vec<SessionListItem> = match self.preferences.view_mode {
             ViewMode::Recent => visible
                 .into_iter()
                 .map(|file| SessionListItem::Session(file.id))
@@ -468,7 +479,36 @@ impl WorkspaceView {
                     .collect()
             }
         };
-        self.session_list_state.reset(self.session_items.len());
+        // Session selection and indexing can update only row metadata. Keep
+        // measured rows and scroll state unless their identities/order change.
+        let prefix = self
+            .session_items
+            .iter()
+            .zip(&items)
+            .take_while(|(old, new)| old.same_row(new))
+            .count();
+        let suffix = self.session_items[prefix..]
+            .iter()
+            .rev()
+            .zip(items[prefix..].iter().rev())
+            .take_while(|(old, new)| old.same_row(new))
+            .count();
+        let old_end = self.session_items.len() - suffix;
+        let new_end = items.len() - suffix;
+        if prefix != old_end || prefix != new_end {
+            let top = self.session_list_state.logical_scroll_top();
+            let anchor = self
+                .session_items
+                .get(top.item_ix)
+                .and_then(|row| items.iter().position(|item| row.same_row(item)));
+            self.session_list_state
+                .splice(prefix..old_end, new_end - prefix);
+            if let Some(item_ix) = anchor {
+                self.session_list_state
+                    .scroll_to(ListOffset { item_ix, ..top });
+            }
+        }
+        self.session_items = items;
     }
 
     fn visible_session_count(&self) -> usize {
@@ -1485,6 +1525,97 @@ mod tests {
     use super::*;
     use gpui::{TestAppContext, VisualTestContext};
     use std::{cell::RefCell, fs, rc::Rc};
+
+    #[gpui::test]
+    fn sidebar_keeps_its_visible_row_after_metadata_updates_and_group_reordering(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sample.jsonl");
+        fs::write(&path, "{}\n").unwrap();
+        let mut database = IndexDatabase::open_in_memory().unwrap();
+        let seed = database
+            .scan_file(
+                SessionSource::Codex,
+                path,
+                &CancellationToken::default(),
+                |_| {},
+            )
+            .unwrap()
+            .file;
+        let files = (0..48)
+            .map(|index| {
+                let mut file = seed.clone();
+                file.id = index + 1;
+                file.path = directory.path().join(format!("{index}.jsonl"));
+                file.working_dir = Some(format!("/work/project-{}", index / 4));
+                file.updated_at = format!("2026-11-03T00:{index:02}:00Z");
+                file
+            })
+            .collect::<Vec<_>>();
+        let selected = files[20].id;
+        for mode in [ViewMode::Grouped, ViewMode::Recent] {
+            let view = cx.update(|cx| {
+                cx.new(|cx| {
+                    let mut view = WorkspaceView::empty(
+                        Preferences {
+                            view_mode: mode,
+                            ..Preferences::default()
+                        },
+                        cx,
+                    );
+                    view.sessions = files.clone();
+                    view.selected_file_id = Some(selected);
+                    view.sort_sessions();
+                    view.rebuild_session_items();
+                    view
+                })
+            });
+            view.update(cx, |view, cx| {
+                let item_ix = view.session_items.iter().position(|item| matches!(item, SessionListItem::Session(id) if *id == selected)).unwrap();
+                assert!(item_ix > 10);
+                let offset = px(13.);
+                view.session_list_state.scroll_to(ListOffset { item_ix, offset_in_item: offset });
+                let assert_anchor = |view: &WorkspaceView| {
+                    let top = view.session_list_state.logical_scroll_top();
+                    assert!(matches!(view.session_items.get(top.item_ix), Some(SessionListItem::Session(id)) if *id == selected));
+                    assert_eq!(top.offset_in_item, offset);
+                    assert_eq!(view.session_list_state.item_count(), view.session_items.len());
+                    assert_eq!(view.selected_file_id, Some(selected));
+                };
+
+                // This is also the metadata upsert used after loading a native
+                // session; neither message counts nor a new title changes rows.
+                let mut updated = files[20].clone();
+                updated.assistant_count += 10;
+                updated.process_count += 20;
+                updated.title = Some("Updated title".into());
+                view.upsert_session(updated);
+                assert_anchor(view);
+
+                // A live session moves its whole group ahead of the viewport.
+                let mut newer = files[0].clone();
+                newer.updated_at = "2027-01-01T00:00:00Z".into();
+                view.upsert_session(newer);
+                assert_anchor(view);
+                if mode == ViewMode::Grouped {
+                    view.collapsed_groups.insert(workspace_group_key(&files[0]));
+                    view.rebuild_session_items();
+                    assert_anchor(view);
+                }
+
+                let mut added = files[0].clone();
+                added.id = 100;
+                added.working_dir = Some("/work/new-project".into());
+                added.updated_at = "2028-01-01T00:00:00Z".into();
+                view.upsert_session(added);
+                assert_anchor(view);
+                view.apply_source_event(SourceLoadEvent::Removed(vec![100]), cx);
+                assert_anchor(view);
+            });
+        }
+    }
 
     #[gpui::test]
     fn missing_native_session_or_key_invalidates_open_plaintext_and_pending_load(
