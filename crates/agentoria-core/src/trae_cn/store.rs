@@ -270,14 +270,24 @@ const CONTENT: &str = "CASE WHEN json_type(r.value,'$.content')='array' THEN jso
 // Older migrated rows have no user_message_context. Only their explicitly
 // linked user_input history is eligible as a fallback, never arbitrary model
 // context or tool-injected user-role messages.
-const USER_TEXT: &str = "COALESCE(CASE WHEN json_type(CASE WHEN json_valid(m.user_message_context) THEN m.user_message_context ELSE '{}' END,'$.query')='text'
+// Some desktop versions encode query as a JSON string of typed text blocks.
+// Decode only that complete shape; keep ordinary JSON input verbatim. Use the
+// same expression for byte lengths, search, and paged reads.
+const USER_TEXT: &str = "(WITH input(value) AS (SELECT COALESCE(CASE WHEN json_type(CASE WHEN json_valid(m.user_message_context) THEN m.user_message_context ELSE '{}' END,'$.query')='text'
     THEN json_extract(m.user_message_context,'$.query')
     ELSE (SELECT group_concat(json_extract(c.value,'$.text'),'')
           FROM history_v2 h JOIN json_each(CASE WHEN json_valid(h.messages) THEN h.messages ELSE '{}' END,'$.raw_messages') r
           JOIN json_each(CASE WHEN json_type(r.value,'$.content')='array' THEN json_extract(r.value,'$.content') ELSE json_array(json_object('type','text','text',json_extract(r.value,'$.content'))) END) c
           WHERE h.session_id=m.session_id AND h.message_id=m.message_id AND h.deleted_at=0 AND h.content_source='user_input'
           AND h.id=(SELECT MIN(h0.id) FROM history_v2 h0 WHERE h0.session_id=m.session_id AND h0.message_id=m.message_id AND h0.deleted_at=0 AND h0.content_source='user_input')
-          AND json_extract(r.value,'$.role')='user' AND json_extract(c.value,'$.type')='text') END,'')";
+          AND json_extract(r.value,'$.role')='user' AND json_extract(c.value,'$.type')='text') END,'')),
+    parts AS (SELECT p.type,CASE WHEN p.type='object' THEN p.value ELSE '{}' END part,CAST(p.key AS INTEGER) position
+              FROM input,json_each(CASE WHEN json_valid(input.value) THEN input.value ELSE 'null' END) p)
+    SELECT CASE WHEN json_type(CASE WHEN json_valid(value) THEN value ELSE 'null' END)='array'
+                     AND EXISTS(SELECT 1 FROM parts)
+                     AND NOT EXISTS(SELECT 1 FROM parts WHERE type<>'object' OR json_extract(part,'$.type') IS NOT 'text' OR json_type(part,'$.data.content') IS NOT 'text')
+                THEN (SELECT group_concat(text,'') FROM (SELECT json_extract(part,'$.data.content') text FROM parts ORDER BY position))
+                ELSE value END FROM input)";
 
 fn snapshot(
     database: &Connection,
@@ -790,6 +800,57 @@ mod tests {
             assert_eq!(
                 read_text_chunk(&reader, line, 0, 64 * 1024).unwrap(),
                 expected.as_bytes()
+            );
+        }
+    }
+
+    #[test]
+    fn encoded_user_text_blocks_share_normalized_lengths_and_paged_utf8_reads() {
+        let (_directory, path, database, key) = fixture();
+        let encoded = json!([
+            {"type":"text","data":{"content":"Hello 用户\n"}},
+            {"type":"text","data":{"content":"**world**"}}
+        ])
+        .to_string();
+        let plain_json = r#"[{"type":"text","text":"Keep literal JSON"}]"#;
+        for (id, query) in [
+            (5, encoded.as_str()),
+            (6, plain_json),
+            (7, "[1,\"text\"]"),
+            (8, "[]"),
+        ] {
+            database
+                .execute(
+                    "INSERT INTO chat_message VALUES(?1,'s',?2,'user',?1,1001,?3,0,0)",
+                    params![id, format!("m{id}"), json!({"query":query}).to_string()],
+                )
+                .unwrap();
+        }
+        let reader = open_database(&path, &key).unwrap();
+        let (_, lines, _) = snapshot(
+            &reader,
+            catalog(&reader, &path).unwrap().remove(0),
+            &CancellationToken::default(),
+        )
+        .unwrap();
+        for (id, expected) in [
+            (5, "Hello 用户\n**world**"),
+            (6, plain_json),
+            (7, "[1,\"text\"]"),
+            (8, "[]"),
+        ] {
+            let line = lines
+                .iter()
+                .find(|line| line.event_type == "trae.user" && line.byte_offset == id)
+                .unwrap();
+            assert_eq!(line.byte_len, expected.len() as u64);
+            assert_eq!(
+                read_text_chunk(&reader, line, 0, 64 * 1024).unwrap(),
+                expected.as_bytes()
+            );
+            assert_eq!(
+                read_text_chunk(&reader, line, 2, 7).unwrap(),
+                expected.as_bytes()[2..9.min(expected.len())]
             );
         }
     }
