@@ -81,7 +81,7 @@ pub struct WorkspaceView {
     workdir_task: Option<Task<()>>,
     session_list_state: ListState,
     sidebar_focus: FocusHandle,
-    initial_focus: bool,
+    restore_sidebar_focus: bool,
     selected_file_id: Option<i64>,
     active_session: Option<Entity<SessionView>>,
     skills_view: Option<Entity<SkillsView>>,
@@ -136,7 +136,7 @@ impl WorkspaceView {
             session_list_state: ListState::new(0, ListAlignment::Top, px(500.))
                 .with_uniform_item_height(px(86.)),
             sidebar_focus: cx.focus_handle(),
-            initial_focus: true,
+            restore_sidebar_focus: true,
             selected_file_id: None,
             active_session: None,
             skills_view: None,
@@ -220,6 +220,7 @@ impl WorkspaceView {
     }
 
     fn load_source(&mut self, source: SessionSource, cx: &mut Context<Self>) {
+        self.restore_sidebar_focus = true;
         self.cancellation.cancel();
         self.trae_key_message = None;
         self.trae_key_view = None;
@@ -1545,7 +1546,12 @@ impl WorkspaceView {
 
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if std::mem::take(&mut self.initial_focus) && window.focused(cx).is_none() {
+        if std::mem::take(&mut self.restore_sidebar_focus)
+            && self.mode == ContentMode::Sessions
+            && self.trae_key_message.is_none()
+        {
+            // A source switch drops the detail/search entity. Its old focus
+            // handle can still exist while no longer belonging to this tree.
             self.sidebar_focus.focus(window, cx);
         }
         if self.mode == ContentMode::Sessions {
@@ -1788,6 +1794,30 @@ mod tests {
         cx.simulate_keystrokes("cmd-l down");
         cx.run_until_parked();
         view.read_with(cx, |view, _| assert_eq!(view.selected_file_id, Some(12)));
+
+        // Dropping the old detail can leave a live but untracked focus handle.
+        // Restoring focus after source replacement must override that handle.
+        let detached = cx.update(|_, cx| cx.focus_handle());
+        cx.update(|window, cx| {
+            detached.focus(window, cx);
+            assert!(window.focused(cx).is_some());
+        });
+        view.update(cx, |view, _| view.restore_sidebar_focus = true);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.update(|window, cx| assert!(view.read(cx).sidebar_focus.is_focused(window)));
+        cx.simulate_keystrokes("cmd-l");
+        cx.update(|window, cx| {
+            assert!(view
+                .read(cx)
+                .workdir_input
+                .as_ref()
+                .unwrap()
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window));
+        });
     }
 
     #[gpui::test]
