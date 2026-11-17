@@ -36,9 +36,9 @@ pub struct Preferences {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
-            theme: "Default Light".to_string(),
-            light_theme: "Default Light".to_string(),
-            dark_theme: "Default Dark".to_string(),
+            theme: "AffectUI Classic Light".to_string(),
+            light_theme: "AffectUI Classic Light".to_string(),
+            dark_theme: "AffectUI Classic Dark".to_string(),
             source: "codex".to_string(),
             view_mode: ViewMode::Recent,
             hide_subagents: true,

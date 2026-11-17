@@ -1,7 +1,8 @@
+use crate::ui;
 use agentoria_core::index::{read_line_chunk, IndexedLine};
 use gpui::{div, px, AppContext, Context, IntoElement, ParentElement, Render, Styled, Window};
 use gpui_kit::component::{
-    button::Button, h_flex, skeleton::Skeleton, v_flex, ActiveTheme, Disableable as _, Sizable as _,
+    h_flex, skeleton::Skeleton, v_flex, ActiveTheme, Disableable as _, Sizable as _,
 };
 
 const PAGE_BYTES: usize = 64 * 1024;
@@ -78,7 +79,7 @@ impl Render for RawRecordView {
                     .gap_3()
                     .child(
                         div()
-                            .text_sm()
+                            .text_size(px(ui::TEXT))
                             .text_color(cx.theme().muted_foreground)
                             .child(format!(
                                 "{} bytes · page {} of {} · 64 KiB per page",
@@ -91,7 +92,7 @@ impl Render for RawRecordView {
                         h_flex()
                             .gap_1()
                             .child(
-                                Button::new("raw-previous")
+                                ui::button("raw-previous")
                                     .xsmall()
                                     .outline()
                                     .label("Previous")
@@ -101,7 +102,7 @@ impl Render for RawRecordView {
                                     })),
                             )
                             .child(
-                                Button::new("raw-next")
+                                ui::button("raw-next")
                                     .xsmall()
                                     .outline()
                                     .label("Next")
@@ -115,14 +116,15 @@ impl Render for RawRecordView {
             .child(if let Some(content) = &self.content {
                 div()
                     .p_3()
-                    .rounded_md()
-                    .bg(cx.theme().muted.opacity(0.35))
-                    .text_xs()
+                    .rounded(px(12.))
+                    .bg(cx.theme().sidebar)
+                    .text_size(px(12.))
+                    .font_family(cx.theme().mono_font_family.clone())
                     .line_height(px(18.))
                     .child(content.clone())
                     .into_any_element()
             } else {
-                Skeleton::new().h_20().rounded_md().into_any_element()
+                Skeleton::new().h_20().rounded(px(12.)).into_any_element()
             })
     }
 }

@@ -1,3 +1,4 @@
+use crate::ui;
 use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
 use gpui::{
@@ -8,7 +9,7 @@ use gpui::{
 };
 use gpui_kit::base::text::{TextView, TextViewState};
 use gpui_kit::component::{
-    button::{Button, ButtonVariants as _},
+    button::ButtonVariants as _,
     h_flex,
     input::{Editor, EditorState, Input, InputEvent, InputState},
     resizable::{h_resizable, resizable_panel, ResizableState},
@@ -494,6 +495,7 @@ impl SkillsView {
                 "skill-row-{}",
                 skill.path.display()
             )))
+            .relative()
             .w_full()
             .gap_1()
             .px_4()
@@ -501,20 +503,29 @@ impl SkillsView {
             .border_b_1()
             .border_color(cx.theme().sidebar_border)
             .cursor_pointer()
-            .when(selected, |this| this.bg(cx.theme().sidebar_accent))
-            .hover(|this| this.bg(cx.theme().sidebar_accent.opacity(0.65)))
+            .when(selected, |this| {
+                this.bg(cx.theme().sidebar_accent)
+                    .child(ui::selection_marker(cx))
+            })
+            .hover(|this| this.bg(cx.theme().sidebar_accent.opacity(0.7)))
             .on_click(cx.listener(move |view, _, _, cx| view.select_skill(path.clone(), cx)))
-            .child(div().truncate().text_sm().font_medium().child(skill.name))
             .child(
                 div()
                     .truncate()
-                    .text_xs()
+                    .text_size(px(ui::TEXT))
+                    .font_medium()
+                    .child(skill.name),
+            )
+            .child(
+                div()
+                    .truncate()
+                    .text_size(px(ui::META))
                     .text_color(cx.theme().muted_foreground)
                     .child(skill.description),
             )
             .child(
                 div()
-                    .text_xs()
+                    .text_size(px(ui::META))
                     .text_color(cx.theme().muted_foreground)
                     .child(format!("{} · {}", skill.scope.label(), skill.origin)),
             )
@@ -528,56 +539,37 @@ impl SkillsView {
             .bg(cx.theme().sidebar)
             .text_color(cx.theme().sidebar_foreground)
             .child(
-                h_flex()
+                v_flex()
                     .flex_shrink_0()
-                    .justify_between()
-                    .px_4()
-                    .py_3()
-                    .border_b_1()
-                    .border_color(cx.theme().sidebar_border)
+                    .gap(px(12.))
+                    .p(px(16.))
                     .child(
-                        v_flex()
-                            .gap_1()
+                        h_flex()
+                            .justify_between()
+                            .gap_2()
                             .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("SKILLS"),
+                                h_flex()
+                                    .gap_2()
+                                    .child(div().text_size(px(15.)).font_semibold().child("Skills"))
+                                    .child(ui::count(self.visible_indices.len(), cx)),
                             )
-                            .child(div().font_semibold().child(self.agent.label()))
                             .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(if self.query.trim().is_empty() {
-                                        format!("{} found", self.skills.len())
-                                    } else {
-                                        format!(
-                                            "{} of {} found",
-                                            self.visible_indices.len(),
-                                            self.skills.len()
-                                        )
-                                    }),
+                                ui::button("refresh-skills")
+                                    .ghost()
+                                    .icon(IconName::RefreshCw)
+                                    .label("Refresh")
+                                    .on_click(cx.listener(|view, _, _, cx| view.refresh(cx))),
                             ),
                     )
-                    .child(
-                        Button::new("refresh-skills")
-                            .xsmall()
-                            .outline()
-                            .label("Refresh")
-                            .on_click(cx.listener(|view, _, _, cx| view.refresh(cx))),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .flex_shrink_0()
-                    .px_4()
-                    .py_3()
-                    .border_b_1()
-                    .border_color(cx.theme().sidebar_border)
+                    .child(ui::caption(
+                        format!("{} · local library", self.agent.label()),
+                        cx,
+                    ))
                     .child(
                         Input::new(&self.search_input)
                             .id("skills-search")
+                            .small()
+                            .prefix(Icon::new(IconName::Search).small())
                             .aria_label("Filter skills")
                             .cleanable(true)
                             .w_full(),
@@ -652,9 +644,12 @@ impl SkillsView {
             .aria_selected(selected)
             .when(folder, |this| this.aria_expanded(expanded))
             .tab_index(0)
-            .when(selected, |this| this.bg(cx.theme().sidebar_accent))
+            .when(selected, |this| {
+                this.bg(cx.theme().sidebar_accent)
+                    .child(ui::selection_marker(cx))
+            })
             .when(!selected, |this| {
-                this.hover(|this| this.bg(cx.theme().sidebar_accent.opacity(0.65)))
+                this.hover(|this| this.bg(cx.theme().sidebar_accent.opacity(0.7)))
             })
             .focus_visible(|style| style.border_1().border_color(cx.theme().ring))
             .on_click(cx.listener(move |view, _, window, cx| {
@@ -691,7 +686,13 @@ impl SkillsView {
                 )
             }))
             .child(Icon::new(icon).small())
-            .child(div().min_w_0().truncate().text_sm().child(label))
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(ui::TEXT))
+                    .child(label),
+            )
             .into_any_element()
     }
 
@@ -717,10 +718,10 @@ impl SkillsView {
                     .child(
                         h_flex()
                             .gap_2()
-                            .child(div().text_xs().font_semibold().child("FILES"))
+                            .child(div().text_size(px(ui::META)).font_semibold().child("FILES"))
                             .child(
                                 div()
-                                    .text_xs()
+                                    .text_size(px(ui::META))
                                     .text_color(cx.theme().muted_foreground)
                                     .child(if truncated {
                                         format!("{count}+")
@@ -730,7 +731,7 @@ impl SkillsView {
                             ),
                     )
                     .child(
-                        Button::new("hide-skill-files")
+                        ui::button("hide-skill-files")
                             .xsmall()
                             .ghost()
                             .icon(IconName::PanelRightClose)
@@ -761,7 +762,7 @@ impl SkillsView {
             } else {
                 div()
                     .p_3()
-                    .text_xs()
+                    .text_size(px(ui::META))
                     .text_color(cx.theme().muted_foreground)
                     .child(if self.detail_loading {
                         "Loading files…"
@@ -794,7 +795,7 @@ impl SkillsView {
                 }))
                 .child(
                     div()
-                        .text_sm()
+                        .text_size(px(ui::TEXT))
                         .text_color(cx.theme().muted_foreground)
                         .child(if self.loading {
                             "Reading skill metadata…"
@@ -807,7 +808,7 @@ impl SkillsView {
                 .when(!self.loading && self.query.trim().is_empty(), |this| {
                     this.children(self.roots.iter().map(|root| {
                         div()
-                            .text_xs()
+                            .text_size(px(ui::META))
                             .text_color(cx.theme().muted_foreground)
                             .child(self.display_path(&root.path))
                     }))
@@ -926,13 +927,13 @@ impl SkillsView {
                             .justify_between()
                             .child(
                                 div()
-                                    .text_xs()
+                                    .text_size(px(ui::META))
                                     .text_color(cx.theme().muted_foreground)
                                     .child("SKILL DETAIL"),
                             )
                             .when(!self.file_panel_open, |this| {
                                 this.child(
-                                    Button::new("show-skill-files")
+                                    ui::button("show-skill-files")
                                         .small()
                                         .outline()
                                         .icon(IconName::PanelRightOpen)
@@ -945,11 +946,15 @@ impl SkillsView {
                             }),
                     )
                     .child(div().text_lg().font_semibold().child(skill.name.clone()))
-                    .child(div().text_sm().child(skill.description.clone()))
+                    .child(
+                        div()
+                            .text_size(px(ui::TEXT))
+                            .child(skill.description.clone()),
+                    )
                     .child(
                         div()
                             .truncate()
-                            .text_xs()
+                            .text_size(px(ui::META))
                             .text_color(cx.theme().muted_foreground)
                             .child(format!(
                                 "{} · {} · {}",
@@ -962,7 +967,7 @@ impl SkillsView {
                         this.child(
                             div()
                                 .truncate()
-                                .text_xs()
+                                .text_size(px(ui::META))
                                 .text_color(cx.theme().muted_foreground)
                                 .child(
                                     self.bundle
@@ -976,7 +981,7 @@ impl SkillsView {
                     .when_some(self.navigation_error.as_ref(), |this, error| {
                         this.child(
                             div()
-                                .text_xs()
+                                .text_size(px(ui::META))
                                 .text_color(cx.theme().danger)
                                 .child(error.clone()),
                         )
@@ -1015,7 +1020,7 @@ impl Render for SkillsView {
             .with_state(&self.resizable_state)
             .child(
                 resizable_panel()
-                    .size(px(340.))
+                    .size(px(ui::SIDEBAR))
                     .size_range(px(280.)..px(520.))
                     .child(self.render_sidebar(cx)),
             )

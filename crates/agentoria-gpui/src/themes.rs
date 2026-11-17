@@ -4,6 +4,10 @@ use gpui_kit::component::{Theme, ThemeMode, ThemeRegistry};
 
 const BUILTIN_THEMES: &[(&str, &str)] = &[
     (
+        "affectui-classic",
+        include_str!("../../../assets/themes/affectui-classic.json"),
+    ),
+    (
         "adventure",
         include_str!("../../../assets/themes/adventure.json"),
     ),
@@ -125,6 +129,10 @@ mod tests {
         cx.update(|cx| register_builtin_themes(cx).expect("builtin themes should load"));
         cx.update(|cx| {
             assert!(available_themes(cx).len() > 20);
+            for name in ["AffectUI Classic Light", "AffectUI Classic Dark"] {
+                assert!(apply_theme(name, None, cx).is_some());
+                assert_eq!(Theme::global(cx).theme_name().as_ref(), name);
+            }
         });
         cx.update(|cx| {
             assert!(apply_theme("Flexoki Light", None, cx).is_some());

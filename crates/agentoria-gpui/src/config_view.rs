@@ -1,3 +1,4 @@
+use crate::ui;
 use std::path::{Path, PathBuf};
 
 use gpui::prelude::FluentBuilder as _;
@@ -7,11 +8,11 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window,
 };
 use gpui_kit::component::{
-    button::{Button, ButtonVariants as _},
+    button::ButtonVariants as _,
     h_flex,
     input::{Editor, EditorState, Input, InputEvent, InputState},
     resizable::{h_resizable, resizable_panel, ResizableState},
-    v_flex, ActiveTheme as _, Sizable as _, StyledExt as _,
+    v_flex, ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _,
 };
 
 use crate::config_catalog::{self, ConfigAgent, ConfigKind, ConfigRoots, ConfigScan};
@@ -263,6 +264,7 @@ impl ConfigView {
         let selected = self.selected_id.as_ref() == Some(&entry.id);
         v_flex()
             .id(SharedString::from(entry.id.clone()))
+            .relative()
             .w_full()
             .h(px(78.))
             .min_w_0()
@@ -279,9 +281,12 @@ impl ConfigView {
             ))
             .aria_selected(selected)
             .tab_index(0)
-            .when(selected, |this| this.bg(cx.theme().sidebar_accent))
+            .when(selected, |this| {
+                this.bg(cx.theme().sidebar_accent)
+                    .child(ui::selection_marker(cx))
+            })
             .when(!selected, |this| {
-                this.hover(|style| style.bg(cx.theme().sidebar_accent.opacity(0.65)))
+                this.hover(|style| style.bg(cx.theme().sidebar_accent.opacity(0.7)))
             })
             .focus_visible(|style| style.border_1().border_color(cx.theme().ring))
             .on_click(cx.listener(move |view, _, window, cx| view.select(entry_index, window, cx)))
@@ -296,21 +301,21 @@ impl ConfigView {
             .child(
                 div()
                     .truncate()
-                    .text_sm()
+                    .text_size(px(ui::TEXT))
                     .font_medium()
                     .child(entry.name.clone()),
             )
             .child(
                 div()
                     .truncate()
-                    .text_xs()
+                    .text_size(px(ui::META))
                     .text_color(cx.theme().muted_foreground)
                     .child(entry.summary.clone()),
             )
             .child(
                 div()
                     .truncate()
-                    .text_xs()
+                    .text_size(px(ui::META))
                     .text_color(cx.theme().muted_foreground)
                     .child(format!("{} · {}", entry.scope, entry.origin)),
             )
@@ -324,52 +329,44 @@ impl ConfigView {
             .bg(cx.theme().sidebar)
             .text_color(cx.theme().sidebar_foreground)
             .child(
-                h_flex()
+                v_flex()
                     .flex_shrink_0()
-                    .justify_between()
-                    .px_4()
-                    .py_3()
-                    .border_b_1()
-                    .border_color(cx.theme().sidebar_border)
+                    .gap(px(12.))
+                    .p(px(16.))
                     .child(
-                        v_flex()
-                            .gap_1()
+                        h_flex()
+                            .justify_between()
+                            .gap_2()
                             .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(self.kind.label().to_uppercase()),
+                                h_flex()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_size(px(15.))
+                                            .font_semibold()
+                                            .child(self.kind.label()),
+                                    )
+                                    .child(ui::count(self.visible.len(), cx)),
                             )
-                            .child(div().font_semibold().child(self.agent.label()))
                             .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(format!(
-                                        "{} of {} found",
-                                        self.visible.len(),
-                                        self.scan.entries.len()
-                                    )),
+                                ui::button("refresh-config")
+                                    .ghost()
+                                    .icon(IconName::RefreshCw)
+                                    .label("Refresh")
+                                    .on_click(
+                                        cx.listener(|view, _, window, cx| view.refresh(window, cx)),
+                                    ),
                             ),
                     )
-                    .child(
-                        Button::new("refresh-config")
-                            .xsmall()
-                            .outline()
-                            .label("Refresh")
-                            .on_click(cx.listener(|view, _, window, cx| view.refresh(window, cx))),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .flex_shrink_0()
-                    .px_4()
-                    .py_3()
-                    .border_b_1()
-                    .border_color(cx.theme().sidebar_border)
+                    .child(ui::caption(
+                        format!("{} · read-only definitions", self.agent.label()),
+                        cx,
+                    ))
                     .child(
                         Input::new(&self.search_input)
                             .id("config-search")
+                            .small()
+                            .prefix(Icon::new(IconName::Search).small())
                             .aria_label(format!("Filter {}", self.kind.noun()))
                             .cleanable(true)
                             .w_full(),
@@ -401,9 +398,9 @@ impl ConfigView {
             .border_color(cx.theme().border)
             .child(
                 div()
-                    .text_xs()
+                    .text_size(px(ui::META))
                     .text_color(cx.theme().muted_foreground)
-                    .child("CONFIGURATION · READ ONLY"),
+                    .child("Read-only configuration"),
             )
             .child(
                 div().text_lg().font_semibold().child(
@@ -413,10 +410,10 @@ impl ConfigView {
                 ),
             )
             .when_some(entry, |this, entry| {
-                this.child(div().text_sm().child(entry.summary.clone()))
+                this.child(div().text_size(px(ui::TEXT)).child(entry.summary.clone()))
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(px(ui::META))
                             .text_color(cx.theme().muted_foreground)
                             .child(format!(
                                 "{} · {} · {}",
@@ -427,14 +424,14 @@ impl ConfigView {
                     )
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(px(ui::META))
                             .text_color(cx.theme().muted_foreground)
                             .child(entry.location.clone()),
                     )
             })
             .child(
                 div()
-                    .text_xs()
+                    .text_size(px(ui::META))
                     .text_color(cx.theme().muted_foreground)
                     .child(
                         self.project
@@ -454,7 +451,7 @@ impl ConfigView {
             .border_b_1()
             .border_color(cx.theme().border)
             .child(
-                Button::new("config-read-errors")
+                ui::button("config-read-errors")
                     .xsmall()
                     .ghost()
                     .label(format!(
@@ -479,7 +476,7 @@ impl ConfigView {
                         .overflow_y_scroll()
                         .children(self.scan.errors.iter().take(20).map(|error| {
                             div()
-                                .text_xs()
+                                .text_size(px(ui::META))
                                 .text_color(cx.theme().danger)
                                 .child(error.clone())
                         })),
@@ -509,7 +506,7 @@ impl ConfigView {
                 }))
                 .child(
                     div()
-                        .text_sm()
+                        .text_size(px(ui::TEXT))
                         .text_color(cx.theme().muted_foreground)
                         .child(if self.query.trim().is_empty() {
                             "Searched these local paths:"
@@ -520,7 +517,7 @@ impl ConfigView {
                 .when(self.query.trim().is_empty(), |this| {
                     this.children(self.scan.paths.iter().take(24).map(|path| {
                         div()
-                            .text_xs()
+                            .text_size(px(ui::META))
                             .text_color(cx.theme().muted_foreground)
                             .child(self.display_path(path))
                     }))
@@ -547,7 +544,7 @@ impl Render for ConfigView {
             .with_state(&self.resizable)
             .child(
                 resizable_panel()
-                    .size(px(340.))
+                    .size(px(ui::SIDEBAR))
                     .size_range(px(280.)..px(520.))
                     .child(self.render_sidebar(cx)),
             )

@@ -1,3 +1,4 @@
+use crate::ui;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     ops::Range,
@@ -11,13 +12,14 @@ use agentoria_core::index::{
     IndexedFile, IndexedLine,
 };
 use gpui::{
-    div, list, prelude::FluentBuilder as _, px, relative, AnyElement, App, AppContext, Context,
-    Focusable as _, FollowMode, InteractiveElement, IntoElement, ListAlignment, ListOffset,
-    ListState, ParentElement, Render, SharedString, Styled, StyledText, Task, Window,
+    div, list, prelude::FluentBuilder as _, px, relative, AnyElement, App, AppContext,
+    ClipboardItem, Context, Focusable as _, FollowMode, InteractiveElement, IntoElement,
+    ListAlignment, ListOffset, ListState, ParentElement, Render, SharedString, Styled, StyledText,
+    Task, Window,
 };
 use gpui_kit::base::text::{RangeHighlight, TextViewState};
 use gpui_kit::component::{
-    button::Button,
+    button::ButtonVariants as _,
     h_flex,
     input::{Input, InputEvent, InputState},
     skeleton::Skeleton,
@@ -83,6 +85,8 @@ pub struct SessionView {
     show_jump_to_bottom: bool,
     on_scroll: Rc<ScrollCallback>,
     search: SessionSearch,
+    copied_message: Option<usize>,
+    copy_task: Option<Task<()>>,
 }
 
 impl SessionView {
@@ -154,6 +158,8 @@ impl SessionView {
             show_jump_to_bottom: initial_anchor.is_some_and(|anchor| !anchor.is_following_tail),
             on_scroll,
             search: SessionSearch::default(),
+            copied_message: None,
+            copy_task: None,
         };
         view.load_visible_bodies(cx);
         view
@@ -167,6 +173,10 @@ impl SessionView {
         cx: &mut Context<Self>,
     ) {
         let conversations_changed = self.conversation_lines.as_ref() != conversations;
+        if conversations_changed {
+            self.copied_message = None;
+            self.copy_task = None;
+        }
         let process_changed = self.process_lines.as_ref() != process;
         let text_may_have_changed = conversations_changed
             || self.file.updated_at != file.updated_at
@@ -433,6 +443,23 @@ impl SessionView {
         cx.notify();
     }
 
+    fn copy_message(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(CachedBody::Loaded(text)) = self.bodies.get(&index) else {
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+        self.copied_message = Some(index);
+        let timer = cx.background_executor().timer(Duration::from_secs(2));
+        self.copy_task = Some(cx.spawn(async move |weak, cx| {
+            timer.await;
+            let _ = weak.update(cx, |view, cx| {
+                view.copied_message = None;
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
     fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.search.input.is_none() {
             let input =
@@ -678,7 +705,7 @@ impl SessionView {
                             .min_w_0(),
                     )
                     .child(
-                        Button::new("session-search-previous")
+                        ui::button("session-search-previous")
                             .small()
                             .outline()
                             .icon(IconName::ChevronUp)
@@ -689,7 +716,7 @@ impl SessionView {
                             ),
                     )
                     .child(
-                        Button::new("session-search-next")
+                        ui::button("session-search-next")
                             .small()
                             .outline()
                             .icon(IconName::ChevronDown)
@@ -700,7 +727,7 @@ impl SessionView {
                             ),
                     )
                     .child(
-                        Button::new("session-search-close")
+                        ui::button("session-search-close")
                             .small()
                             .outline()
                             .icon(IconName::Close)
@@ -712,7 +739,7 @@ impl SessionView {
             )
             .child(
                 div()
-                    .text_xs()
+                    .text_size(px(ui::META))
                     .text_color(cx.theme().muted_foreground)
                     .child(self.search.status()),
             )
@@ -745,8 +772,8 @@ impl SessionView {
         v_flex()
             .flex_shrink_0()
             .gap_2()
-            .px_5()
-            .py_4()
+            .px(px(24.))
+            .py(px(16.))
             .border_b_1()
             .border_color(cx.theme().border)
             .child(
@@ -759,14 +786,14 @@ impl SessionView {
                             .gap_1()
                             .child(
                                 div()
-                                    .text_xs()
+                                    .text_size(px(ui::META))
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("TRANSCRIPT"),
+                                    .child("Conversation"),
                             )
                             .child(
                                 div()
                                     .truncate()
-                                    .text_xl()
+                                    .text_size(px(20.))
                                     .font_semibold()
                                     .child(session_title(&self.file)),
                             ),
@@ -775,9 +802,8 @@ impl SessionView {
                         h_flex()
                             .gap_2()
                             .child(
-                                Button::new("find-in-session")
-                                    .small()
-                                    .outline()
+                                ui::button("find-in-session")
+                                    .ghost()
                                     .icon(IconName::Search)
                                     .label("Find")
                                     .tooltip("Find in session (⌘F)")
@@ -786,9 +812,8 @@ impl SessionView {
                                     })),
                             )
                             .child(
-                                Button::new("toggle-markdown")
-                                    .small()
-                                    .outline()
+                                ui::button("toggle-markdown")
+                                    .ghost()
                                     .icon(IconName::File)
                                     .label(markdown_label)
                                     .on_click(
@@ -800,7 +825,7 @@ impl SessionView {
             .child(
                 h_flex()
                     .gap_4()
-                    .text_xs()
+                    .text_size(px(ui::META))
                     .text_color(cx.theme().muted_foreground)
                     .child(format!(
                         "{} user · {} assistant · {} process",
@@ -857,7 +882,7 @@ impl SessionView {
             .unwrap_or(ConversationKind::Assistant);
         let accent = match kind {
             ConversationKind::User => cx.theme().blue,
-            ConversationKind::Assistant => cx.theme().green,
+            ConversationKind::Assistant => cx.theme().foreground,
         };
         let role = match kind {
             ConversationKind::User => "USER",
@@ -880,10 +905,11 @@ impl SessionView {
                     ..Default::default()
                 }))
                 .selectable(true)
+                .text_size(px(ui::BODY))
                 .w_full()
                 .into_any_element(),
             Some(CachedBody::Loaded(text)) => div()
-                .text_sm()
+                .text_size(px(ui::TEXT))
                 .line_height(px(22.))
                 .child(
                     StyledText::new(text.clone()).with_highlights(
@@ -910,7 +936,7 @@ impl SessionView {
                     format_bytes(*source_bytes)
                 ))
                 .child(
-                    Button::new(SharedString::from(format!(
+                    ui::button(SharedString::from(format!(
                         "open-raw-{}-{}",
                         self.file.id, line.ordinal
                     )))
@@ -932,12 +958,12 @@ impl SessionView {
                 .gap_2()
                 .child(
                     div()
-                        .text_sm()
+                        .text_size(px(ui::TEXT))
                         .text_color(cx.theme().muted_foreground)
                         .child(format!("Unable to load message: {error}")),
                 )
                 .child(
-                    Button::new(SharedString::from(format!(
+                    ui::button(SharedString::from(format!(
                         "retry-message-{}-{}",
                         self.file.id, line.ordinal
                     )))
@@ -959,36 +985,70 @@ impl SessionView {
             )))
             .relative()
             .w_full()
-            .gap_2()
-            .px_5()
-            .py_4()
+            .gap(px(12.))
+            .px(px(24.))
+            .py(px(20.))
             .border_b_1()
             .border_color(cx.theme().border)
             .when(active_range.is_some(), |row| {
                 row.bg(cx.theme().muted.opacity(0.3))
             })
-            .child(
-                div()
-                    .absolute()
-                    .left(px(12.))
-                    .top_4()
-                    .bottom_4()
-                    .w(px(2.))
-                    .bg(accent),
-            )
+            .when(kind == ConversationKind::User, |row| {
+                row.bg(cx.theme().blue.opacity(0.025))
+            })
             .child(
                 h_flex()
                     .debug_selector(|| "session-message-header".to_string())
                     .justify_between()
-                    .text_xs()
-                    .child(div().font_semibold().text_color(accent).child(role))
+                    .gap_3()
+                    .child(ui::badge(role, accent, accent.opacity(0.08)))
                     .child(
-                        div()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(line.timestamp.clone().unwrap_or_default()),
+                        h_flex()
+                            .gap_3()
+                            .child(ui::caption(
+                                line.timestamp
+                                    .as_deref()
+                                    .unwrap_or_default()
+                                    .get(..19)
+                                    .unwrap_or_else(|| {
+                                        line.timestamp.as_deref().unwrap_or_default()
+                                    })
+                                    .replace('T', " "),
+                                cx,
+                            ))
+                            .child(
+                                ui::icon_button(
+                                    SharedString::from(format!(
+                                        "copy-message-{}-{}",
+                                        self.file.id, line.ordinal
+                                    )),
+                                    if self.copied_message == Some(conversation_index) {
+                                        IconName::Check
+                                    } else {
+                                        IconName::Copy
+                                    },
+                                    if self.copied_message == Some(conversation_index) {
+                                        "Copied"
+                                    } else {
+                                        "Copy message"
+                                    },
+                                )
+                                .disabled(!matches!(
+                                    self.bodies.get(&conversation_index),
+                                    Some(CachedBody::Loaded(_))
+                                ))
+                                .on_click(cx.listener(
+                                    move |view, _, _, cx| view.copy_message(conversation_index, cx),
+                                )),
+                            ),
                     ),
             )
-            .child(content)
+            .child(
+                div()
+                    .debug_selector(|| "session-message-body".to_string())
+                    .w_full()
+                    .child(content),
+            )
             .into_any_element()
     }
 
@@ -1001,10 +1061,10 @@ impl SessionView {
         h_flex()
             .w_full()
             .min_w_0()
-            .min_h(px(72.))
+            .min_h(px(60.))
             .justify_between()
             .gap_4()
-            .px_5()
+            .px(px(24.))
             .py_3()
             .border_b_1()
             .border_color(cx.theme().border)
@@ -1026,16 +1086,16 @@ impl SessionView {
                     .child(
                         div()
                             .truncate()
-                            .text_xs()
+                            .text_size(px(ui::META))
                             .text_color(cx.theme().muted_foreground)
                             .child("Reasoning, tools, token usage, context and system events"),
                     ),
             )
             .child(
-                Button::new("open-process-details")
+                ui::button("open-process-details")
                     .flex_shrink_0()
                     .small()
-                    .outline()
+                    .ghost()
                     .icon(IconName::PanelRightOpen)
                     .label("View details")
                     .on_click(move |_, window, cx| {
@@ -1089,7 +1149,7 @@ impl Render for SessionView {
                     )
                     .when(self.show_jump_to_bottom, |this| {
                         this.child(
-                            Button::new("jump-to-bottom")
+                            ui::button("jump-to-bottom")
                                 .absolute()
                                 .bottom_4()
                                 .left(relative(0.5))
@@ -1171,6 +1231,26 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{CachedBody, SessionView, MAX_CACHED_BODIES, MAX_LOAD_BATCH};
+
+    #[gpui::test]
+    fn message_copy_uses_original_text_and_feedback_expires(cx: &mut TestAppContext) {
+        let (_directory, lines) = search_fixture();
+        let view = cx.update(|cx| {
+            cx.new(|cx| SessionView::new(test_file(3), lines, Vec::new(), None, |_, _, _| {}, cx))
+        });
+        wait_for_load(&view, cx);
+        view.update(cx, |view, cx| view.copy_message(0, cx));
+        assert_eq!(
+            cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()))
+                .as_deref(),
+            Some("First **Rust** and RUST")
+        );
+        view.read_with(cx, |view, _| assert_eq!(view.copied_message, Some(0)));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(3));
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| assert!(view.copied_message.is_none()));
+    }
 
     #[gpui::test]
     fn unchanged_and_process_only_snapshots_keep_cache_search_and_pixel_scroll(
@@ -1776,6 +1856,8 @@ mod tests {
                     show_jump_to_bottom: false,
                     on_scroll: Rc::new(|_, _, _| {}),
                     search: crate::session_search::SessionSearch::default(),
+                    copied_message: None,
+                    copy_task: None,
                 }
             });
             gpui_kit::component::Root::new(view, window, cx)
@@ -1783,10 +1865,10 @@ mod tests {
         let cx: &mut VisualTestContext = cx;
         draw(cx);
 
-        let header = cx
-            .debug_bounds("session-message-header")
-            .expect("message header should be rendered");
-        let from = point(header.left() + px(4.), header.bottom() + px(10.));
+        let body = cx
+            .debug_bounds("session-message-body")
+            .expect("message body should be rendered");
+        let from = point(body.left() + px(4.), body.top() + px(10.));
         let to = point(from.x + px(140.), from.y);
         cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
         draw(cx);
@@ -1846,6 +1928,8 @@ mod tests {
                     show_jump_to_bottom: false,
                     on_scroll: Rc::new(|_, _, _| {}),
                     search: crate::session_search::SessionSearch::default(),
+                    copied_message: None,
+                    copy_task: None,
                 };
                 let markdown =
                     "## Result\n\n- first item\n- second item\n\n```rust\nfn main() {}\n```";

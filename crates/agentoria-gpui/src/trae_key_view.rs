@@ -1,3 +1,4 @@
+use crate::ui;
 use agentoria_core::{
     index::CancellationToken,
     trae_cn::{
@@ -5,12 +6,13 @@ use agentoria_core::{
         credentials::{key_path, SessionKey},
     },
 };
+use gpui::px;
 use gpui::{
     div, AppContext as _, Context, Entity, EventEmitter, IntoElement, ParentElement as _, Render,
     Styled as _, Subscription, Task, Window,
 };
 use gpui_kit::component::{
-    button::{Button, ButtonVariants as _},
+    button::ButtonVariants as _,
     input::{Input, InputContentType, InputEvent, InputState},
     v_flex, ActiveTheme as _, Disableable as _, StyledExt as _,
 };
@@ -137,17 +139,17 @@ impl Render for TraeKeyView {
             .child(
                 v_flex()
                     .w_full()
-                    .max_w(gpui::px(620.))
+                    .max_w(gpui::px(460.))
                     .gap_4()
                     .child(
                         div()
-                            .text_lg()
-                            .font_semibold()
+                            .text_size(px(20.))
+                            .font_medium()
                             .child("Unlock Trae CN sessions"),
                     )
                     .child(
                         div()
-                            .text_sm()
+                            .text_size(px(ui::TEXT))
                             .text_color(cx.theme().muted_foreground)
                             .child(
                                 "Enter this installation’s session key to read its local history.",
@@ -163,13 +165,13 @@ impl Render for TraeKeyView {
                     )
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(px(ui::META))
                             .text_color(cx.theme().muted_foreground)
                             .child(format!("Saved locally for next time: {path}")),
                     )
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(px(ui::META))
                             .text_color(cx.theme().muted_foreground)
                             .child(
                             "The database is opened read-only. Each user supplies their own key.",
@@ -177,12 +179,12 @@ impl Render for TraeKeyView {
                     )
                     .children(self.error.as_ref().map(|error| {
                         div()
-                            .text_sm()
+                            .text_size(px(ui::TEXT))
                             .text_color(cx.theme().danger)
                             .child(error.clone())
                     }))
                     .child(
-                        Button::new("save-trae-session-key")
+                        ui::button("save-trae-session-key")
                             .primary()
                             .label(if self.pending {
                                 "Validating…"

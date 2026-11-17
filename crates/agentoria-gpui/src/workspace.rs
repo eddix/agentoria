@@ -1,3 +1,4 @@
+use gpui_kit::base::InteractiveElementExt as _;
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -10,19 +11,19 @@ use agentoria_core::{
 };
 use gpui::{
     div, list, prelude::FluentBuilder as _, px, Anchor, AnyElement, App, AppContext, Context,
-    Entity, InteractiveElement, IntoElement, KeyDownEvent, ListAlignment, ListOffset, ListState,
-    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Task,
-    Window,
+    Entity, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, ListAlignment, ListOffset,
+    ListState, MouseButton, ParentElement, Render, SharedString, StatefulInteractiveElement,
+    Styled, Subscription, Task, Window,
 };
 use gpui_kit::component::{
-    button::{Button, ButtonVariants as _},
+    button::ButtonVariants as _,
     h_flex,
     input::{Input, InputEvent, InputState},
     menu::{DropdownMenu as _, PopupMenuItem},
     progress::Progress,
     resizable::{h_resizable, resizable_panel, ResizableState},
     skeleton::Skeleton,
-    tab::TabBar,
+    tab::{Tab, TabBar},
     v_flex, ActiveTheme, Icon, IconName, Root, Sizable as _, StyledExt as _, ThemeMode, TitleBar,
 };
 
@@ -36,6 +37,7 @@ use crate::{
     skills_view::SkillsView,
     themes,
     trae_key_view::{KeySaved, TraeKeyView},
+    ui,
     workdir_filter::WorkdirFilter,
 };
 
@@ -78,6 +80,8 @@ pub struct WorkspaceView {
     workdir_subscription: Option<Subscription>,
     workdir_task: Option<Task<()>>,
     session_list_state: ListState,
+    sidebar_focus: FocusHandle,
+    initial_focus: bool,
     selected_file_id: Option<i64>,
     active_session: Option<Entity<SessionView>>,
     skills_view: Option<Entity<SkillsView>>,
@@ -131,6 +135,8 @@ impl WorkspaceView {
             workdir_task: None,
             session_list_state: ListState::new(0, ListAlignment::Top, px(500.))
                 .with_uniform_item_height(px(86.)),
+            sidebar_focus: cx.focus_handle(),
+            initial_focus: true,
             selected_file_id: None,
             active_session: None,
             skills_view: None,
@@ -627,6 +633,19 @@ impl WorkspaceView {
                 }
             }
         }
+        match mode {
+            ContentMode::Sessions => self.sidebar_focus.focus(window, cx),
+            ContentMode::Skills => {
+                if let Some(view) = &self.skills_view {
+                    view.update(cx, |view, cx| view.focus_search(window, cx));
+                }
+            }
+            ContentMode::Hooks | ContentMode::Mcp => {
+                if let Some(view) = self.config_view() {
+                    view.update(cx, |view, cx| view.focus_search(window, cx));
+                }
+            }
+        }
         cx.notify();
     }
 
@@ -661,6 +680,48 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let modifiers = event.keystroke.modifiers;
+        let key = event.keystroke.key.as_str();
+        if modifiers.platform && !modifiers.control && !modifiers.alt && !modifiers.shift {
+            let mode = match key {
+                "1" => Some(ContentMode::Sessions),
+                "2" => Some(ContentMode::Skills),
+                "3" => Some(ContentMode::Hooks),
+                "4" => Some(ContentMode::Mcp),
+                _ => None,
+            };
+            if let Some(mode) = mode {
+                self.set_mode(mode, window, cx);
+                window.prevent_default();
+                cx.stop_propagation();
+                return;
+            }
+            if key.eq_ignore_ascii_case("l") {
+                if self.mode == ContentMode::Sessions {
+                    self.ensure_workdir_input(window, cx);
+                    if let Some(input) = &self.workdir_input {
+                        input.update(cx, |input, cx| input.focus(window, cx));
+                    }
+                } else if let Some(config) = self.config_view() {
+                    config.update(cx, |view, cx| view.focus_search(window, cx));
+                } else if let Some(skills) = &self.skills_view {
+                    skills.update(cx, |view, cx| view.focus_search(window, cx));
+                }
+                window.prevent_default();
+                cx.stop_propagation();
+                return;
+            }
+        }
+        if self.mode == ContentMode::Sessions
+            && self.sidebar_focus.is_focused(window)
+            && !modifiers.modified()
+            && matches!(key, "up" | "down" | "home" | "end")
+        {
+            self.navigate_sessions(key, cx);
+            window.prevent_default();
+            cx.stop_propagation();
+            return;
+        }
         if self.mode == ContentMode::Sessions {
             if self.active_session.as_ref().is_some_and(|session| {
                 session.update(cx, |view, cx| {
@@ -716,6 +777,36 @@ impl WorkspaceView {
             window.prevent_default();
             cx.stop_propagation();
         }
+    }
+
+    fn navigate_sessions(&mut self, key: &str, cx: &mut Context<Self>) {
+        let rows = self
+            .session_items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| {
+                if let SessionListItem::Session(id) = row {
+                    Some((index, *id))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        if rows.is_empty() {
+            return;
+        }
+        let current = rows
+            .iter()
+            .position(|(_, id)| Some(*id) == self.selected_file_id);
+        let target = match key {
+            "home" => 0,
+            "end" => rows.len() - 1,
+            "up" => current.unwrap_or(1).saturating_sub(1),
+            _ => current.map_or(0, |index| (index + 1).min(rows.len() - 1)),
+        };
+        let (index, id) = rows[target];
+        self.session_list_state.scroll_to_reveal_item(index);
+        self.select_session(id, cx);
     }
 
     fn select_session(&mut self, file_id: i64, cx: &mut Context<Self>) {
@@ -838,8 +929,7 @@ impl WorkspaceView {
                 SessionSource::TraeCn => SkillAgent::Trae,
             });
         let source_button: AnyElement = if self.mode == ContentMode::Sessions {
-            Button::new("source-menu")
-                .small()
+            ui::button("source-menu")
                 .outline()
                 .label(source_label(source))
                 .dropdown_caret(true)
@@ -888,8 +978,7 @@ impl WorkspaceView {
                 })
                 .into_any_element()
         } else if self.mode == ContentMode::Skills {
-            Button::new("skill-agent-menu")
-                .small()
+            ui::button("skill-agent-menu")
                 .outline()
                 .label(skill_agent.label())
                 .dropdown_caret(true)
@@ -916,8 +1005,7 @@ impl WorkspaceView {
                 .map(|view| view.read(cx).agent())
                 .unwrap_or(ConfigAgent::Codex);
             let weak = cx.weak_entity();
-            Button::new("config-agent-menu")
-                .small()
+            ui::button("config-agent-menu")
                 .outline()
                 .label(config_agent.label())
                 .dropdown_caret(true)
@@ -941,7 +1029,7 @@ impl WorkspaceView {
         };
         let active_theme = cx.theme().theme_name().to_string();
         let available_themes = themes::available_themes(cx);
-        TitleBar::new().child(
+        TitleBar::new().h(px(44.)).child(
             h_flex()
                 .size_full()
                 .justify_between()
@@ -951,7 +1039,7 @@ impl WorkspaceView {
                         .gap_2()
                         .items_center()
                         .child(logo_mark(cx))
-                        .child(div().font_semibold().child("Agentoria"))
+                        .child(div().text_size(px(14.)).font_semibold().child("Agentoria"))
                         .when(crate::IS_PREVIEW, |this| {
                             this.child(
                                 div()
@@ -963,7 +1051,10 @@ impl WorkspaceView {
                 )
                 .child(
                     h_flex()
+                        .id("toolbar-controls")
                         .gap_1()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_double_click(|_, _, cx| cx.stop_propagation())
                         .child(
                             TabBar::new("content-mode")
                                 .segmented()
@@ -984,15 +1075,19 @@ impl WorkspaceView {
                                     };
                                     view.set_mode(mode, window, cx);
                                 }))
-                                .child("Sessions")
-                                .child("Skills")
-                                .child("Hooks")
-                                .child("MCP"),
+                                .child(Tab::new().label("Sessions").suffix(ui::shortcut("⌘1", cx)))
+                                .child(Tab::new().label("Skills").suffix(ui::shortcut("⌘2", cx)))
+                                .child(Tab::new().label("Hooks").suffix(ui::shortcut("⌘3", cx)))
+                                .child(Tab::new().label("MCP").suffix(ui::shortcut("⌘4", cx))),
                         )
-                        .child(source_button)
                         .child(
-                            Button::new("theme-menu")
-                                .small()
+                            div()
+                                .id("source-picker")
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .child(source_button),
+                        )
+                        .child(
+                            ui::button("theme-menu")
                                 .outline()
                                 .icon(IconName::Palette)
                                 .label(active_theme.clone())
@@ -1048,8 +1143,7 @@ impl WorkspaceView {
                                 }),
                         )
                         .child(
-                            Button::new("theme-toggle")
-                                .small()
+                            ui::button("theme-toggle")
                                 .ghost()
                                 .icon(if cx.theme().is_dark() {
                                     IconName::Sun
@@ -1069,112 +1163,175 @@ impl WorkspaceView {
 
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let count = self.visible_session_count();
-        let view_mode = self.preferences.view_mode;
-        let hide_subagents = self.preferences.hide_subagents;
+        let grouped = self.preferences.view_mode == ViewMode::Grouped;
         v_flex()
             .size_full()
             .min_h_0()
+            .track_focus(&self.sidebar_focus)
             .bg(cx.theme().sidebar)
             .text_color(cx.theme().sidebar_foreground)
             .child(
                 v_flex()
                     .flex_shrink_0()
-                    .gap_1()
-                    .px_4()
-                    .py_3()
-                    .border_b_1()
-                    .border_color(cx.theme().sidebar_border)
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("SESSIONS"),
-                    )
+                    .gap(px(14.))
+                    .p(px(16.))
                     .child(
                         h_flex()
                             .justify_between()
-                            .child(div().font_semibold().child(source_label(self.source)))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(format!("{count} shown")),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .justify_between()
-                            .gap_2()
-                            .pt_2()
                             .child(
                                 h_flex()
-                                    .gap_1()
+                                    .gap_2()
                                     .child(
-                                        Button::new("view-recent")
-                                            .xsmall()
-                                            .when(view_mode == ViewMode::Recent, |button| {
-                                                button.primary()
-                                            })
+                                        div().text_size(px(15.)).font_semibold().child("Sessions"),
+                                    )
+                                    .child(ui::count(count, cx)),
+                            )
+                            .child(ui::caption(source_label(self.source), cx)),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .justify_between()
+                            .child(
+                                h_flex()
+                                    .gap(px(2.))
+                                    .p(px(2.))
+                                    .rounded(px(12.))
+                                    .bg(cx.theme().muted)
+                                    .child(
+                                        ui::button("view-recent")
+                                            .ghost()
+                                            .h(px(26.))
                                             .label("Recent")
+                                            .when(!grouped, |button| {
+                                                button
+                                                    .bg(cx.theme().background)
+                                                    .text_color(cx.theme().foreground)
+                                                    .shadow_sm()
+                                            })
                                             .on_click(cx.listener(|view, _, _, cx| {
                                                 view.set_view_mode(ViewMode::Recent, cx)
                                             })),
                                     )
                                     .child(
-                                        Button::new("view-grouped")
-                                            .xsmall()
-                                            .when(view_mode == ViewMode::Grouped, |button| {
-                                                button.primary()
-                                            })
+                                        ui::button("view-grouped")
+                                            .ghost()
+                                            .h(px(26.))
                                             .label("Grouped")
+                                            .when(grouped, |button| {
+                                                button
+                                                    .bg(cx.theme().background)
+                                                    .text_color(cx.theme().foreground)
+                                                    .shadow_sm()
+                                            })
                                             .on_click(cx.listener(|view, _, _, cx| {
                                                 view.set_view_mode(ViewMode::Grouped, cx)
                                             })),
                                     ),
                             )
                             .child(
-                                Button::new("toggle-subagents")
-                                    .xsmall()
-                                    .outline()
-                                    .icon(IconName::EyeOff)
-                                    .label(if hide_subagents { "Hidden" } else { "Shown" })
-                                    .tooltip("Show or hide auxiliary sessions, including Codex guardian reviews")
+                                ui::button("toggle-subagents")
+                                    .ghost()
+                                    .h(px(26.))
+                                    .icon(if self.preferences.hide_subagents {
+                                        IconName::EyeOff
+                                    } else {
+                                        IconName::Eye
+                                    })
+                                    .label(if self.preferences.hide_subagents {
+                                        "Hidden"
+                                    } else {
+                                        "Shown"
+                                    })
+                                    .tooltip("Show or hide auxiliary sessions")
                                     .on_click(
                                         cx.listener(|view, _, _, cx| view.toggle_subagents(cx)),
                                     ),
                             ),
-                    ),
-            )
-            .when_some(self.workdir_input.as_ref(), |this, input| {
-                this.child(h_flex().flex_shrink_0().px_4().py_3().border_b_1().border_color(cx.theme().sidebar_border)
-                    .capture_action(cx.listener(|view, _: &gpui_kit::component::input::Escape, window, cx| {
-                        if !view.workdir_filter.query.is_empty() {
-                            if let Some(input) = &view.workdir_input {
-                                input.update(cx, |input, cx| input.set_value("", window, cx));
-                            }
-                            view.set_workdir_query(String::new(), cx);
-                            cx.stop_propagation();
-                        }
+                    )
+                    .children(self.workdir_input.as_ref().map(|input| {
+                        h_flex()
+                            .w_full()
+                            .capture_action(cx.listener(
+                                |view, _: &gpui_kit::component::input::Escape, window, cx| {
+                                    if !view.workdir_filter.query.is_empty() {
+                                        if let Some(input) = &view.workdir_input {
+                                            input.update(cx, |input, cx| {
+                                                input.set_value("", window, cx)
+                                            });
+                                        }
+                                        view.set_workdir_query(String::new(), cx);
+                                        cx.stop_propagation();
+                                    }
+                                },
+                            ))
+                            .child(
+                                Input::new(input)
+                                    .id("workdir-filter")
+                                    .small()
+                                    .prefix(Icon::new(IconName::Search).small())
+                                    .aria_label("Filter work directories")
+                                    .cleanable(true)
+                                    .w_full(),
+                            )
                     }))
-                    .child(Input::new(input).id("workdir-filter").aria_label("Filter work directories").cleanable(true).w_full()))
-            })
-            .when(self.source==SessionSource::TraeCn,|this|this.child(
-                h_flex().gap_2().px_4().py_2().border_b_1().border_color(cx.theme().sidebar_border)
-                    .child(Button::new("refresh-trae-cn").xsmall().outline().label("Refresh").on_click(cx.listener(|view,_,_,cx|view.load_source(SessionSource::TraeCn,cx))))
-                    .child(Button::new("trae-cn-key-setup").xsmall().outline().label("Session key").on_click(cx.listener(|view,_,_,cx|{
-                        view.trae_key_message=Some(String::new());view.trae_key_view=None;view.trae_key_subscription=None;cx.notify();
-                    })))
-            ))
-            .when(self.workdir_filter.matching || (count == 0 && !self.workdir_filter.query.trim().is_empty()), |this| {
-                this.child(div().px_4().py_3().text_xs().text_color(cx.theme().muted_foreground)
-                    .child(if self.workdir_filter.matching { "Matching work directories…" } else { "No matching work directories" }))
-            })
+                    .when(self.source == SessionSource::TraeCn, |this| {
+                        this.child(
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    ui::button("refresh-trae-cn")
+                                        .ghost()
+                                        .label("Refresh")
+                                        .on_click(cx.listener(|view, _, _, cx| {
+                                            view.load_source(SessionSource::TraeCn, cx)
+                                        })),
+                                )
+                                .child(
+                                    ui::button("trae-cn-key-setup")
+                                        .ghost()
+                                        .label("Session key")
+                                        .on_click(cx.listener(|view, _, _, cx| {
+                                            view.trae_key_message = Some(String::new());
+                                            view.trae_key_view = None;
+                                            view.trae_key_subscription = None;
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                    }),
+            )
+            .when(
+                self.workdir_filter.matching
+                    || (count == 0 && !self.workdir_filter.query.trim().is_empty()),
+                |this| {
+                    this.child(div().px_4().py_3().child(ui::caption(
+                        if self.workdir_filter.matching {
+                            "Matching work directories…"
+                        } else {
+                            "No matching work directories"
+                        },
+                        cx,
+                    )))
+                },
+            )
             .child(
-                list(
-                    self.session_list_state.clone(),
-                    cx.processor(|view, index: usize, _, cx| view.render_session_row(index, cx)),
-                )
-                .size_full(),
+                div()
+                    .size_full()
+                    .min_h_0()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|view, _, window, cx| view.sidebar_focus.focus(window, cx)),
+                    )
+                    .child(
+                        list(
+                            self.session_list_state.clone(),
+                            cx.processor(|view, index: usize, _, cx| {
+                                view.render_session_row(index, cx)
+                            }),
+                        )
+                        .size_full(),
+                    ),
             )
             .into_any_element()
     }
@@ -1192,14 +1349,14 @@ impl WorkspaceView {
                 .id(SharedString::from(format!("session-group-{key}")))
                 .relative()
                 .w_full()
-                .min_h(px(42.))
+                .min_h(px(36.))
                 .justify_between()
                 .gap_2()
                 .px_4()
-                .py_2()
+                .py(px(7.))
                 .border_b_1()
                 .border_color(cx.theme().sidebar_border)
-                .bg(cx.theme().sidebar_accent)
+                .bg(cx.theme().sidebar)
                 .text_color(cx.theme().sidebar_accent_foreground)
                 .cursor_pointer()
                 .hover(|this| this.bg(cx.theme().sidebar_primary.opacity(0.14)))
@@ -1217,20 +1374,15 @@ impl WorkspaceView {
                             .small(),
                         )
                         .child(Icon::new(IconName::Folder).small())
-                        .child(div().truncate().text_sm().font_semibold().child(label)),
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(11.))
+                                .font_medium()
+                                .child(label),
+                        ),
                 )
-                .child(
-                    div()
-                        .min_w(px(24.))
-                        .px_1()
-                        .py_0p5()
-                        .rounded_full()
-                        .bg(cx.theme().sidebar_primary.opacity(0.12))
-                        .text_xs()
-                        .text_color(cx.theme().sidebar_primary)
-                        .text_center()
-                        .child(count.to_string()),
-                )
+                .child(ui::count(count, cx))
                 .into_any_element();
         };
         let Some(file) = self.sessions.iter().find(|file| file.id == file_id) else {
@@ -1241,28 +1393,38 @@ impl WorkspaceView {
         let workspace = workspace_label(file);
         v_flex()
             .id(SharedString::from(format!("session-row-{file_id}")))
+            .relative()
             .w_full()
             .gap_1()
             .px_4()
-            .py_3()
+            .py(px(12.))
             .border_b_1()
             .border_color(cx.theme().sidebar_border)
             .cursor_pointer()
-            .when(selected, |this| this.bg(cx.theme().sidebar_accent))
+            .when(selected, |this| {
+                this.bg(cx.theme().sidebar_accent)
+                    .child(ui::selection_marker(cx))
+            })
             .hover(|this| this.bg(cx.theme().sidebar_accent.opacity(0.65)))
             .on_click(cx.listener(move |view, _, _, cx| view.select_session(file_id, cx)))
-            .child(div().truncate().font_medium().text_sm().child(title))
             .child(
                 div()
                     .truncate()
-                    .text_xs()
+                    .font_medium()
+                    .text_size(px(ui::TEXT))
+                    .child(title),
+            )
+            .child(
+                div()
+                    .truncate()
+                    .text_size(px(ui::META))
                     .text_color(cx.theme().muted_foreground)
                     .child(workspace),
             )
             .child(
                 h_flex()
                     .justify_between()
-                    .text_xs()
+                    .text_size(px(ui::META))
                     .text_color(cx.theme().muted_foreground)
                     .child(if file.source == SessionSource::TraeCn {
                         format!("{} turns · {} process", file.user_count, file.process_count)
@@ -1290,19 +1452,13 @@ impl WorkspaceView {
                 .children((0..6).map(|_| Skeleton::new().h_20().rounded_md()))
                 .into_any_element();
         }
-        v_flex()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .child(div().font_semibold().child("Select a session"))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Select a session to read the conversation."),
-            )
-            .into_any_element()
+        ui::empty(
+            IconName::Inbox,
+            "Your conversations, together",
+            "Choose a session to read its conversation and explore the process behind it.",
+            cx,
+        )
+        .into_any_element()
     }
 
     fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1357,7 +1513,7 @@ impl WorkspaceView {
             .px_3()
             .border_t_1()
             .border_color(cx.theme().border)
-            .bg(cx.theme().background)
+            .bg(cx.theme().status_bar)
             .child(
                 h_flex()
                     .min_w_0()
@@ -1389,6 +1545,9 @@ impl WorkspaceView {
 
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.initial_focus) && window.focused(cx).is_none() {
+            self.sidebar_focus.focus(window, cx);
+        }
         if self.mode == ContentMode::Sessions {
             self.ensure_workdir_input(window, cx);
         }
@@ -1424,7 +1583,7 @@ impl Render for WorkspaceView {
                     .with_state(&self.resizable_state)
                     .child(
                         resizable_panel()
-                            .size(px(340.))
+                            .size(px(ui::SIDEBAR))
                             .size_range(px(280.)..px(520.))
                             .child(self.render_sidebar(cx)),
                     )
@@ -1557,8 +1716,79 @@ fn short_timestamp(timestamp: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{TestAppContext, VisualTestContext};
+    use gpui::{Focusable as _, TestAppContext, VisualTestContext};
     use std::{cell::RefCell, fs, rc::Rc};
+
+    #[gpui::test]
+    fn list_shortcuts_respect_filter_focus_and_skip_group_headers(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let directory = tempfile::tempdir().unwrap();
+        let index_path = directory.path().join("index.sqlite");
+        let path = directory.path().join("sample.jsonl");
+        fs::write(&path, "{}\n").unwrap();
+        let mut database = IndexDatabase::open(&index_path).unwrap();
+        let file = database
+            .scan_file(
+                SessionSource::Codex,
+                path,
+                &CancellationToken::default(),
+                |_| {},
+            )
+            .unwrap()
+            .file;
+        let slot = Rc::new(RefCell::new(None::<Entity<WorkspaceView>>));
+        let target = slot.clone();
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                let mut view = WorkspaceView::empty(
+                    Preferences {
+                        view_mode: ViewMode::Grouped,
+                        ..Preferences::default()
+                    },
+                    cx,
+                );
+                view.index_path = index_path;
+                view.sessions = (0..12)
+                    .map(|index| {
+                        let mut file = file.clone();
+                        file.id = index + 1;
+                        file.working_dir = Some(format!("/work/group-{}", index / 3));
+                        file
+                    })
+                    .collect();
+                view.rebuild_session_items();
+                view
+            });
+            *target.borrow_mut() = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+        let view = slot.borrow().as_ref().unwrap().clone();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.simulate_keystrokes("cmd-l");
+        cx.update(|window, cx| {
+            assert!(view
+                .read(cx)
+                .workdir_input
+                .as_ref()
+                .unwrap()
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window));
+        });
+        view.update_in(cx, |view, window, cx| view.sidebar_focus.focus(window, cx));
+        cx.simulate_keystrokes("down");
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| assert_eq!(view.selected_file_id, Some(1)));
+        cx.simulate_keystrokes("end");
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| assert_eq!(view.selected_file_id, Some(12)));
+        cx.simulate_keystrokes("cmd-l down");
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| assert_eq!(view.selected_file_id, Some(12)));
+    }
 
     #[gpui::test]
     fn first_catalog_starts_at_top_even_after_the_empty_list_has_painted(cx: &mut TestAppContext) {
