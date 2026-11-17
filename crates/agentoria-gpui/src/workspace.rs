@@ -23,7 +23,7 @@ use gpui_kit::component::{
     progress::Progress,
     resizable::{h_resizable, resizable_panel, ResizableState},
     skeleton::Skeleton,
-    tab::{Tab, TabBar},
+    tab::TabBar,
     v_flex, ActiveTheme, Icon, IconName, Root, Sizable as _, StyledExt as _, ThemeMode, TitleBar,
 };
 
@@ -1059,7 +1059,6 @@ impl WorkspaceView {
                         .child(
                             TabBar::new("content-mode")
                                 .segmented()
-                                // The 28px selected pill contains the 20px kbd with 4px vertical padding.
                                 .large()
                                 .selected_index(match self.mode {
                                     ContentMode::Sessions => 0,
@@ -1077,10 +1076,10 @@ impl WorkspaceView {
                                     };
                                     view.set_mode(mode, window, cx);
                                 }))
-                                .child(Tab::new().label("Sessions").suffix(ui::shortcut("⌘1", cx)))
-                                .child(Tab::new().label("Skills").suffix(ui::shortcut("⌘2", cx)))
-                                .child(Tab::new().label("Hooks").suffix(ui::shortcut("⌘3", cx)))
-                                .child(Tab::new().label("MCP").suffix(ui::shortcut("⌘4", cx))),
+                                .child("Sessions")
+                                .child("Skills")
+                                .child("Hooks")
+                                .child("MCP"),
                         )
                         .child(
                             div()

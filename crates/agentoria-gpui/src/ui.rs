@@ -52,21 +52,6 @@ pub fn count(count: usize, cx: &App) -> Div {
     )
 }
 
-pub fn shortcut(label: &'static str, cx: &App) -> Div {
-    div()
-        .px(px(5.))
-        .h(px(20.))
-        .rounded(px(5.))
-        .bg(cx.theme().background)
-        .shadow_sm()
-        .border_1()
-        .border_color(cx.theme().border)
-        .text_size(px(10.))
-        .line_height(px(18.))
-        .text_color(cx.theme().muted_foreground)
-        .child(label)
-}
-
 pub fn empty(
     icon: IconName,
     title: &'static str,
