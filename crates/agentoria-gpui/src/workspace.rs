@@ -1059,7 +1059,8 @@ impl WorkspaceView {
                         .child(
                             TabBar::new("content-mode")
                                 .segmented()
-                                .small()
+                                // The 28px selected pill contains the 20px kbd with 4px vertical padding.
+                                .large()
                                 .selected_index(match self.mode {
                                     ContentMode::Sessions => 0,
                                     ContentMode::Skills => 1,
